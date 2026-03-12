@@ -1,0 +1,5 @@
+prusti-*.db
+prusti-*/
+alloc/
+core/
+tests/*.rs
