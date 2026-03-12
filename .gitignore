@@ -3,3 +3,6 @@ prusti-*/
 alloc/
 core/
 tests/*.rs
+__pycache__/
+rustc-ice-*.txt
+log/
