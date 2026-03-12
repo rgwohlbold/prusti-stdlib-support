@@ -1,0 +1,8 @@
+alloc/
+core/
+tests/
+__pycache__/
+*.ipynb
+*.sh
+*.txt
+log/
