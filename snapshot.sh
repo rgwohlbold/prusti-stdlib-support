@@ -1,5 +1,5 @@
 #!/bin/bash
-# Creates a self-contained snapshot of the current release build of Prusti.
+# Creates a self-contained snapshot of the current debug build of Prusti.
 # Output: ./prusti-<timestamp>-<hash>/
 
 set -euo pipefail
@@ -16,22 +16,22 @@ if ! git -C "$PRUSTI" diff --quiet -- HEAD; then
     exit 1
 fi
 
-# Force a rebuild and build release
+# Force a rebuild and build debug
 touch "$PRUSTI/prusti/src/driver.rs"
-(cd "$PRUSTI" && ./x.py build --release)
+(cd "$PRUSTI" && ./x.py build)
 
 mkdir -p "$DEST/deps"
 
 # Copy executables
 for bin in prusti-rustc cargo-prusti prusti-driver prusti-server prusti-smt-solver; do
-    cp "$PRUSTI/target/release/$bin" "$DEST/"
+    cp "$PRUSTI/target/debug/$bin" "$DEST/"
 done
 
 # Copy contracts library to root so get_prusti_contracts_dir finds it
-cp "$PRUSTI/target/verify/release"/libprusti_contracts*.rlib "$DEST/"
+cp "$PRUSTI/target/verify/debug"/libprusti_contracts*.rlib "$DEST/"
 
 # Copy deps (proc macro .so and other rlibs)
-cp "$PRUSTI/target/verify/release/deps"/* "$DEST/deps/"
+cp "$PRUSTI/target/verify/debug/deps"/* "$DEST/deps/"
 
 # Symlink viper_tools so Viper/Z3 are found without setting env vars
 ln -s "$PRUSTI/viper_tools" "$DEST/viper_tools"
