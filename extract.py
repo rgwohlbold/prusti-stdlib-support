@@ -13,7 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-def process_file(file_path: Path, output_dir: Path):
+def process_file(library: str, file_path: Path, output_dir: Path):
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
@@ -57,7 +57,7 @@ def process_file(file_path: Path, output_dir: Path):
                     # Such lines carry code we can't evaluate (e.g. concat!(...)),
                     # so the extracted snippet would be incomplete.
                     if not skip_current_block and not has_doc_attr_in_block and current_block:
-                        save_snippet(file_path, block_counter, current_block, output_dir)
+                        save_snippet(library, file_path, block_counter, current_block, output_dir)
                         block_counter += 1
                         current_block = []
                     skip_current_block = False
@@ -191,7 +191,7 @@ def _has_top_level_question_op(body_content: str) -> bool:
     return False
 
 
-def save_snippet(original_file: Path, index: int, lines: list, output_dir: Path):
+def save_snippet(library: str, original_file: Path, index: int, lines: list, output_dir: Path):
     lines = _remove_prusti_injected_features(lines)
     content = "\n".join(lines)
 
@@ -265,7 +265,7 @@ def save_snippet(original_file: Path, index: int, lines: list, output_dir: Path)
             content = prefix + outer_prefix + "fn main() {\n" + indented + "\n}"
 
     # Create a safe filename based on the original file path
-    safe_filename = original_file.stem + f"_doctest_{index}.rs"
+    safe_filename = f"{library}_{original_file.stem}_doctest_{index}.rs"
     out_path = output_dir / safe_filename
 
     with open(out_path, 'w', encoding='utf-8') as f:
@@ -290,7 +290,7 @@ def cmd_extract(args):
     ]
 
     for file_path in tqdm(rs_files, desc="Extracting", unit="file"):
-        process_file(file_path, output_dir)
+        process_file(args.library, file_path, output_dir)
 
     print(f"Done! Scanned {len(rs_files)} Rust files and extracted snippets to {output_dir}")
 
@@ -551,7 +551,7 @@ def cmd_full(args):
 
     for lib in ["alloc", "core"]:
         print(f"=== {lib} ===")
-        cmd_extract(argparse.Namespace(source_dir=f"{lib}/src/", output_dir=f"{lib}/snippets/"))
+        cmd_extract(argparse.Namespace(library=lib, source_dir=f"{lib}/src/", output_dir=f"{lib}/snippets/"))
         cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=args.prusti_rustc))
         cmd_copy_passing(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", dest_dir=args.dest_dir))
 
@@ -586,6 +586,7 @@ def main():
     p_extract = subparsers.add_parser("extract", help="Extract doctests from Rust source files.")
     p_extract.add_argument("--src-dir", required=True, dest="source_dir", help="Path to the Rust source directory (e.g., src/)")
     p_extract.add_argument("--snippets-dir", required=True, dest="output_dir", help="Directory to write extracted .rs snippets into")
+    p_extract.add_argument("--library", required=True, dest="library", help="Name of the library, e.g. 'core' or 'alloc'")
     p_extract.set_defaults(func=cmd_extract)
 
     # compile subcommand
