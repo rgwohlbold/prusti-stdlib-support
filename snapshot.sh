@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-PRUSTI="/home/richard/progs/prusti-dev"
+PRUSTI="/root/prusti-dev"
 TIMESTAMP=$(git -C "$PRUSTI" log -1 --format="%cd" --date=format:"%Y%m%d-%H%M%S")
 HASH=$(git -C "$PRUSTI" rev-parse --short=9 HEAD)
 NAME="$TIMESTAMP-$HASH"
