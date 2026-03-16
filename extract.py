@@ -1,4 +1,9 @@
 #!/usr/bin/python3
+# /// script
+# dependencies = [
+#   "tqdm",
+# ]
+# ///
 import os
 import re
 import signal
