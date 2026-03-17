@@ -1,13 +1,11 @@
 FROM python:3.14-slim
 
-ARG DB_FILE
-RUN test -n "$DB_FILE" || (echo "DB_FILE build arg is required" && exit 1)
-
 WORKDIR /app
 
 COPY browse.py prusti_analysis.py ./
 COPY issues/ issues/
-COPY ${DB_FILE} ./
+# Copy all database files — at least one prusti-*.db must exist in the build context
+COPY *.db ./
 
 RUN pip install --no-cache-dir polars markdown
 

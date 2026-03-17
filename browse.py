@@ -2,9 +2,9 @@
 """Browse Prusti analysis results in a web browser.
 
 Usage:
-    browse.py [--db <path>] [--port N]
+    browse.py [--db <path> [<path> ...]] [--port N]
 
-Defaults to the most recent prusti-*.db file and port 8765.
+Defaults to all prusti-*.db files found in the current directory and port 8765.
 """
 import argparse
 import html
@@ -26,7 +26,57 @@ def _render_markdown(text: str) -> str:
         return f"<pre>{html.escape(text)}</pre>"
 
 
-def _index_page(db_path: Path, df: pl.DataFrame) -> str:
+_COMMON_STYLE = """
+  body { font-family: sans-serif; max-width: 960px; margin: 2em auto; color: #222; }
+  h1   { font-size: 1.4em; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 6px 14px; text-align: left; }
+  th { background: #f3f3f3; }
+  tr:nth-child(even) { background: #fafafa; }
+  .no-issue { color: #888; }
+  a { color: #1a6eb5; }
+  a.back { display: inline-block; margin-bottom: 1.5em; text-decoration: none; }
+  a.back:hover { text-decoration: underline; }
+"""
+
+
+def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
+    rows = []
+    for name in sorted(dbs):
+        df      = dbs[name]
+        total   = len(df)
+        success = len(df.filter(df["success"] == "success"))
+        fail    = len(df.filter(df["success"] == "fail"))
+        timeout = len(df.filter(df["success"] == "timeout"))
+        link = f'<a href="/db/{urllib.parse.quote(name)}">{html.escape(name)}</a>'
+        rows.append(
+            f"<tr><td>{link}</td>"
+            f"<td style='text-align:right'>{total}</td>"
+            f"<td style='text-align:right'>{success}</td>"
+            f"<td style='text-align:right'>{fail}</td>"
+            f"<td style='text-align:right'>{timeout}</td></tr>"
+        )
+    rows_html = "\n".join(rows)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Prusti Analysis</title>
+<style>{_COMMON_STYLE}
+  .summary {{ margin-bottom: 1.5em; color: #555; }}
+</style>
+</head>
+<body>
+<h1>Prusti Analysis — Databases</h1>
+<table>
+<tr><th>Database</th><th>Total</th><th>Success</th><th>Fail</th><th>Timeout</th></tr>
+{rows_html}
+</table>
+</body>
+</html>"""
+
+
+def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
     total   = len(df)
     success = len(df.filter(df["success"] == "success"))
     fail    = len(df.filter(df["success"] == "fail"))
@@ -50,29 +100,21 @@ def _index_page(db_path: Path, df: pl.DataFrame) -> str:
             link = f'<a href="/issue/{urllib.parse.quote(fname)}">{html.escape(cat)}</a>'
         else:
             link = f'<span class="no-issue">{html.escape(cat)}</span>'
-        rows.append(f"<tr><td>{link}</td><td>{count}</td></tr>")
+        rows.append(f"<tr><td>{link}</td><td style='text-align:right'>{count}</td></tr>")
 
     rows_html = "\n".join(rows)
+    back = '<a class="back" href="/">← All databases</a>\n' if multi else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Prusti Analysis</title>
-<style>
-  body {{ font-family: sans-serif; max-width: 960px; margin: 2em auto; color: #222; }}
-  h1   {{ font-size: 1.4em; }}
+<title>Prusti Analysis — {html.escape(db_name)}</title>
+<style>{_COMMON_STYLE}
   .summary {{ margin-bottom: 1.5em; color: #555; }}
-  table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ border: 1px solid #ddd; padding: 6px 14px; text-align: left; }}
-  th {{ background: #f3f3f3; }}
-  tr:nth-child(even) {{ background: #fafafa; }}
-  td:last-child {{ text-align: right; width: 5em; }}
-  .no-issue {{ color: #888; }}
-  a {{ color: #1a6eb5; }}
 </style>
 </head>
 <body>
-<h1>Prusti Analysis — {html.escape(db_path.name)}</h1>
+{back}<h1>Prusti Analysis — {html.escape(db_name)}</h1>
 <p class="summary">
   Total: <b>{total}</b> &nbsp;|&nbsp;
   Success: <b>{success}</b> &nbsp;|&nbsp;
@@ -118,8 +160,12 @@ def _issue_page(filename: str) -> tuple[str, int]:
 </html>""", 200
 
 
-def make_handler(db_path: Path, df: pl.DataFrame):
-    index_html = _index_page(db_path, df)
+def make_handler(dbs: dict[str, pl.DataFrame]):
+    multi = len(dbs) > 1
+    root_html    = _db_list_page(dbs)
+    index_pages  = {name: _index_page(name, df, multi) for name, df in dbs.items()}
+    # If single db, redirect root straight to that db page
+    single_name  = next(iter(dbs)) if not multi else None
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -127,7 +173,16 @@ def make_handler(db_path: Path, df: pl.DataFrame):
             path   = urllib.parse.unquote(parsed.path)
 
             if path == "/":
-                self._respond(200, index_html)
+                if single_name:
+                    self._redirect(f"/db/{urllib.parse.quote(single_name)}")
+                else:
+                    self._respond(200, root_html)
+            elif path.startswith("/db/"):
+                name = path[len("/db/"):]
+                if name in index_pages:
+                    self._respond(200, index_pages[name])
+                else:
+                    self._respond(404, "<h1>Database not found</h1>")
             elif path.startswith("/issue/"):
                 filename = path[len("/issue/"):]
                 body, status = _issue_page(filename)
@@ -143,6 +198,11 @@ def make_handler(db_path: Path, df: pl.DataFrame):
             self.end_headers()
             self.wfile.write(data)
 
+        def _redirect(self, location: str):
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+
         def log_message(self, fmt, *args):  # suppress per-request noise
             pass
 
@@ -153,21 +213,35 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--db",   help="Path to .db file (default: most recent prusti-*.db)")
+    parser.add_argument("--db",   nargs="*", help="Path(s) to .db files (default: all prusti-*.db)")
     parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
     args = parser.parse_args()
 
-    db_path = Path(args.db) if args.db else sorted(Path(".").glob("prusti-*.db"))[-1]
-    if not db_path.exists():
-        import sys
-        print(f"Error: {db_path} not found", file=sys.stderr)
+    import sys
+
+    if args.db:
+        db_paths = [Path(p) for p in args.db]
+    else:
+        db_paths = sorted(Path(".").glob("prusti-*.db"))
+        if not db_paths:
+            print("Error: no prusti-*.db files found", file=sys.stderr)
+            sys.exit(1)
+
+    dbs: dict[str, pl.DataFrame] = {}
+    for db_path in db_paths:
+        if not db_path.exists():
+            print(f"Warning: {db_path} not found, skipping", file=sys.stderr)
+            continue
+        print(f"Loading {db_path.name} …")
+        dbs[db_path.name] = pa.transform(pa.load_dbs([db_path]))
+
+    if not dbs:
+        print("Error: no valid database files loaded", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loading {db_path.name} …")
-    df = pa.transform(pa.load_dbs([db_path]))
-
-    Handler = make_handler(db_path, df)
+    Handler = make_handler(dbs)
     with http.server.HTTPServer(("", args.port), Handler) as server:
+        print(f"Loaded {len(dbs)} database(s).")
         print(f"Serving at http://localhost:{args.port}  (Ctrl-C to stop)")
         server.serve_forever()
 
