@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ARG DB_FILE
 RUN test -n "$DB_FILE" || (echo "DB_FILE build arg is required" && exit 1)
