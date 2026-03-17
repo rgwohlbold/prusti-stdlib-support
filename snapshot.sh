@@ -18,7 +18,7 @@ fi
 
 # Force a rebuild and build debug
 touch "$PRUSTI/prusti/src/driver.rs"
-(cd "$PRUSTI" && ./x.py build)
+(cd "$PRUSTI" && git submodule update && ./x.py build)
 
 mkdir -p "$DEST/deps"
 
