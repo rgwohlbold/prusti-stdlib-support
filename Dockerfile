@@ -1,14 +1,17 @@
-FROM python:3.14-slim
+FROM python:3.14-slim AS builder
 
-WORKDIR /app
+WORKDIR /build
 
 COPY browse.py prusti_analysis.py ./
 COPY issues/ issues/
-# Copy all database files — at least one prusti-*.db must exist in the build context
 COPY *.db ./
 
 RUN pip install --no-cache-dir polars markdown
+RUN python browse.py --output /build/static
 
-EXPOSE 8765
 
-CMD ["python", "browse.py", "--port", "8765"]
+FROM nginx:alpine
+
+COPY --from=builder /build/static /usr/share/nginx/html
+
+EXPOSE 80
