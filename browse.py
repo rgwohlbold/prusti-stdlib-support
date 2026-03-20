@@ -26,7 +26,7 @@ def _render_markdown(text: str) -> str:
 
 
 _COMMON_STYLE = """
-  body { font-family: sans-serif; max-width: 960px; margin: 2em auto; color: #222; }
+  body { font-family: sans-serif; margin: 2em; color: #222; }
   h1   { font-size: 1.4em; }
   table { border-collapse: collapse; width: 100%; }
   th, td { border: 1px solid #ddd; padding: 6px 14px; text-align: left; }
