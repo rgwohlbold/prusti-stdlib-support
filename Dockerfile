@@ -2,11 +2,12 @@ FROM python:3.14-slim AS builder
 
 WORKDIR /build
 
-COPY browse.py prusti_analysis.py ./
+RUN pip install --no-cache-dir polars markdown
+
 COPY issues/ issues/
+COPY browse.py prusti_analysis.py ./
 COPY *.db ./
 
-RUN pip install --no-cache-dir polars markdown
 RUN python browse.py --output /build/static
 
 
