@@ -9,13 +9,17 @@ import re
 import signal
 import argparse
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
+
+PRUSTI_SERVER_PORT = 27010
 
 
 def process_file(library: str, file_path: Path, output_dir: Path):
@@ -469,9 +473,22 @@ def _run_prusti(rs_file: Path, prusti_rustc: Path, timeout: int, env: dict) -> t
             return "timeout", ""
 
 
-def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int) -> tuple[str, str]:
+def _wait_for_server(port: int, timeout: float = 60.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("localhost", port), timeout=0.5):
+                return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.2)
+    raise TimeoutError(f"prusti-server did not start within {timeout:.0f}s")
+
+
+def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_address: str | None = None) -> tuple[str, str]:
     env = os.environ.copy()
     env.update(PRUSTI_ENV)
+    if server_address:
+        env["PRUSTI_SERVER_ADDRESS"] = server_address
     return _run_prusti(rs_file, prusti_rustc, timeout, env)
 
 
@@ -506,25 +523,42 @@ def cmd_prusti(args):
     ok = fail = timed_out = 0
     failures = []
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(prusti_one, f, prusti_rustc, timeout): f for f in rs_files}
-        with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
-            for future in as_completed(futures):
-                rs_file = futures[future]
-                status, stderr = future.result()
-                conn.execute(
-                    "INSERT INTO results (file_name, success, output) VALUES (?, ?, ?)",
-                    (rs_file.name, status, stderr),
-                )
-                conn.commit()
-                if status == "success":
-                    ok += 1
-                elif status == "fail":
-                    fail += 1
-                    failures.append((rs_file, stderr))
-                else:
-                    timed_out += 1
-                pbar.update(1)
+    prusti_server = prusti_rustc.parent / "prusti-server"
+    server_proc = None
+    server_address = None
+    try:
+        server_proc = subprocess.Popen(
+            [str(prusti_server), "--port", str(PRUSTI_SERVER_PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        _wait_for_server(PRUSTI_SERVER_PORT)
+        server_address = f"localhost:{PRUSTI_SERVER_PORT}"
+        print(f"prusti-server started on port {PRUSTI_SERVER_PORT}")
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(prusti_one, f, prusti_rustc, timeout, server_address): f for f in rs_files}
+            with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
+                for future in as_completed(futures):
+                    rs_file = futures[future]
+                    status, stderr = future.result()
+                    conn.execute(
+                        "INSERT INTO results (file_name, success, output) VALUES (?, ?, ?)",
+                        (rs_file.name, status, stderr),
+                    )
+                    conn.commit()
+                    if status == "success":
+                        ok += 1
+                    elif status == "fail":
+                        fail += 1
+                        failures.append((rs_file, stderr))
+                    else:
+                        timed_out += 1
+                    pbar.update(1)
+    finally:
+        if server_proc:
+            server_proc.terminate()
+            server_proc.wait()
 
     conn.close()
 

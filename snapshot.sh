@@ -23,7 +23,7 @@ touch "$PRUSTI/prusti/src/driver.rs"
 mkdir -p "$DEST/deps"
 
 # Copy executables
-for bin in prusti-rustc cargo-prusti prusti-driver prusti-server prusti-smt-solver; do
+for bin in prusti-rustc cargo-prusti prusti-driver prusti-server prusti-server-driver prusti-smt-solver; do
     cp "$PRUSTI/target/debug/$bin" "$DEST/"
 done
 
