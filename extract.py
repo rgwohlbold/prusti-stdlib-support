@@ -4,6 +4,7 @@
 #   "tqdm",
 # ]
 # ///
+import itertools
 import os
 import re
 import signal
@@ -12,14 +13,21 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 
-PRUSTI_SERVER_PORT = 27010
+_worker_local   = threading.local()
+_worker_counter = itertools.count()
+
+PRUSTI_SERVER_PORT         = 27010
+PRUSTI_SERVER_COUNT        = os.cpu_count() or 8  # one server per core
+PRUSTI_WORKERS_PER_SERVER  = 2
 
 
 def process_file(library: str, file_path: Path, output_dir: Path):
@@ -484,11 +492,12 @@ def _wait_for_server(port: int, timeout: float = 60.0):
     raise TimeoutError(f"prusti-server did not start within {timeout:.0f}s")
 
 
-def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_address: str | None = None) -> tuple[str, str]:
+def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str]) -> tuple[str, str]:
+    if not hasattr(_worker_local, 'idx'):
+        _worker_local.idx = next(_worker_counter)
     env = os.environ.copy()
     env.update(PRUSTI_ENV)
-    if server_address:
-        env["PRUSTI_SERVER_ADDRESS"] = server_address
+    env["PRUSTI_SERVER_ADDRESS"] = server_addresses[_worker_local.idx % len(server_addresses)]
     return _run_prusti(rs_file, prusti_rustc, timeout, env)
 
 
@@ -523,21 +532,33 @@ def cmd_prusti(args):
     ok = fail = timed_out = 0
     failures = []
 
-    prusti_server = prusti_rustc.parent / "prusti-server"
-    server_proc = None
-    server_address = None
+    prusti_server_bin = prusti_rustc.parent / "prusti-server"
+    server_procs = []
+    server_addresses = []
     try:
-        server_proc = subprocess.Popen(
-            [str(prusti_server), "--port", str(PRUSTI_SERVER_PORT)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        _wait_for_server(PRUSTI_SERVER_PORT)
-        server_address = f"localhost:{PRUSTI_SERVER_PORT}"
-        print(f"prusti-server started on port {PRUSTI_SERVER_PORT}")
+        if prusti_server_bin.is_file():
+            for i in range(PRUSTI_SERVER_COUNT):
+                port = PRUSTI_SERVER_PORT + i
+                proc = subprocess.Popen(
+                    [str(prusti_server_bin), "--port", str(port)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                server_procs.append(proc)
+                server_addresses.append(f"localhost:{port}")
+            for port in range(PRUSTI_SERVER_PORT, PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT):
+                _wait_for_server(port)
+            print(f"Started {PRUSTI_SERVER_COUNT} prusti-server instances (ports {PRUSTI_SERVER_PORT}–{PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT - 1})")
+        else:
+            print(f"Error: prusti-server not found at {prusti_server_bin}", file=sys.stderr)
+            sys.exit(1)
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(prusti_one, f, prusti_rustc, timeout, server_address): f for f in rs_files}
+        max_workers = PRUSTI_SERVER_COUNT * PRUSTI_WORKERS_PER_SERVER
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses): f
+                for f in rs_files
+            }
             with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
                 for future in as_completed(futures):
                     rs_file = futures[future]
@@ -556,9 +577,10 @@ def cmd_prusti(args):
                         timed_out += 1
                     pbar.update(1)
     finally:
-        if server_proc:
-            server_proc.terminate()
-            server_proc.wait()
+        for proc in server_procs:
+            proc.terminate()
+        for proc in server_procs:
+            proc.wait()
 
     conn.close()
 
