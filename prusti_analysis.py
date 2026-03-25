@@ -39,7 +39,7 @@ def _categorize(
     # elif "PcgError { kind: Unsupported(CallWithUnsafePtrWithNestedLifetime), context: [] }" in output:
     #     return "unsupported (pcg): call with unsafe ptr with nested lifetimes"
     elif panic_message == "called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(DerefUnsafePtr), context: [] }":
-        return "unsupported: dereferencing unsafe pointers (pcg)"
+        return "unsupported (pcg): dereferencing unsafe pointers"
     elif "<prusti_encoder::encoders::ty::generics::args_ty::GArgsTyEnc as task_encoder::TaskEncoder>::do_encode_full" in output and "compiler/rustc_middle/src/ty/generic_args.rs" in panic_location:
         return "bug: indexing during parametric const encoding"
     elif panic_location == "prusti-encoder/src/encoders/mir_builtin.rs" and panic_message.startswith("expected array") and "prusti_encoder::encoders::mir_builtin::MirBuiltinEnc::handle_unsize" in output:
@@ -62,6 +62,10 @@ def _categorize(
         return "unsupported: bitwise operations"
     elif panic_message == "not yet implemented: cast kind PointerCoercion(MutToConstPointer, Implicit)":
         return "unsupported: implicit mut-to-const pointer coercions"
+    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(CallWithUnsafePtrWithNestedLifetime(PlaceContainingPtrWithNestedLifetime"):
+        return "unsupported (pcg): call with unsafe ptr with nested lifetime"
+    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(MoveUnsafePtrWithNestedLifetime(PlaceContainingPtrWithNestedLifetime"):
+        return "unsupported (pcg): move unsafe ptr with nested lifetime"
     elif panic_message == "internal error: entered unreachable code":
         if panic_location == "prusti-encoder/src/encoders/ty/generics/params.rs" and first_prusti_frame == "prusti_encoder::encoders::ty::generics::params::GParams::ty_params::{{closure}}":
             return "bug: g_params uses concrete substs instead of identity args"
