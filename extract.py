@@ -434,11 +434,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS results (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT    NOT NULL,
-            success   TEXT    NOT NULL,  -- 'success', 'fail', or 'timeout'
-            output    TEXT,
-            timestamp TEXT    DEFAULT CURRENT_TIMESTAMP
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name  TEXT    NOT NULL,
+            success    TEXT    NOT NULL,  -- 'success', 'fail', or 'timeout'
+            output     TEXT,
+            duration_s REAL,
+            timestamp  TEXT    DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -450,6 +451,7 @@ PRUSTI_ENV = {
     "PRUSTI_QUIET": "true",
     "PRUSTI_FULL_COMPILATION": "true",
     "PRUSTI_CARGO": "",
+    "PRUSTI_CHECK_OVERFLOWS": "false",
 }
 
 PRUSTI_NO_VERIFY_ENV = {
@@ -458,8 +460,8 @@ PRUSTI_NO_VERIFY_ENV = {
 }
 
 
-def _run_prusti(rs_file: Path, prusti_rustc: Path, timeout: int, env: dict) -> tuple[str, str]:
-    """Run prusti-rustc with the given env; return (status, stderr)."""
+def _run_prusti(rs_file: Path, prusti_rustc: Path, timeout: int, env: dict) -> tuple[str, str, float]:
+    """Run prusti-rustc with the given env; return (status, stderr, elapsed_s)."""
     with tempfile.TemporaryDirectory() as tmp:
         proc = subprocess.Popen(
             [str(prusti_rustc), "--edition", "2021", "--crate-type=lib", "--out-dir", tmp, str(rs_file)],
@@ -469,13 +471,14 @@ def _run_prusti(rs_file: Path, prusti_rustc: Path, timeout: int, env: dict) -> t
             env=env,
             start_new_session=True,
         )
+        t0 = time.monotonic()
         try:
             _, stderr = proc.communicate(timeout=timeout)
-            return ("success" if proc.returncode == 0 else "fail"), stderr
+            return ("success" if proc.returncode == 0 else "fail"), stderr, time.monotonic() - t0
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
-            return "timeout", ""
+            return "timeout", "", time.monotonic() - t0
 
 
 def _wait_for_server(port: int, timeout: float = 60.0):
@@ -489,7 +492,7 @@ def _wait_for_server(port: int, timeout: float = 60.0):
     raise TimeoutError(f"prusti-server did not start within {timeout:.0f}s")
 
 
-def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str]) -> tuple[str, str]:
+def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str]) -> tuple[str, str, float]:
     if not hasattr(_worker_local, 'idx'):
         _worker_local.idx = next(_worker_counter)
     env = os.environ.copy()
@@ -560,10 +563,10 @@ def cmd_prusti(args):
             with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
                 for future in as_completed(futures):
                     rs_file = futures[future]
-                    status, stderr = future.result()
+                    status, stderr, duration_s = future.result()
                     conn.execute(
-                        "INSERT INTO results (file_name, success, output) VALUES (?, ?, ?)",
-                        (rs_file.name, status, stderr),
+                        "INSERT INTO results (file_name, success, output, duration_s) VALUES (?, ?, ?, ?)",
+                        (rs_file.name, status, stderr, duration_s),
                     )
                     conn.commit()
                     if status == "success":
