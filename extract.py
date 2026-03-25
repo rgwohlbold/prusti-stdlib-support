@@ -25,9 +25,8 @@ from tqdm import tqdm
 _worker_local   = threading.local()
 _worker_counter = itertools.count()
 
-PRUSTI_SERVER_PORT         = 27010
-PRUSTI_SERVER_COUNT        = os.cpu_count() or 8  # one server per core
-PRUSTI_WORKERS_PER_SERVER  = 2
+PRUSTI_SERVER_PORT  = 27010
+PRUSTI_SERVER_COUNT = os.cpu_count() or 8  # one server per core
 
 
 def process_file(library: str, file_path: Path, output_dir: Path):
@@ -553,7 +552,7 @@ def cmd_prusti(args):
             print(f"Error: prusti-server not found at {prusti_server_bin}", file=sys.stderr)
             sys.exit(1)
 
-        max_workers = PRUSTI_SERVER_COUNT * PRUSTI_WORKERS_PER_SERVER
+        max_workers = PRUSTI_SERVER_COUNT
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses): f
