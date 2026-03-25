@@ -26,7 +26,7 @@ _worker_local   = threading.local()
 _worker_counter = itertools.count()
 
 PRUSTI_SERVER_PORT  = 27010
-PRUSTI_SERVER_COUNT = os.cpu_count() or 8  # one server per core
+PRUSTI_SERVER_COUNT = 4
 
 
 def process_file(library: str, file_path: Path, output_dir: Path):
@@ -447,8 +447,6 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 
 PRUSTI_ENV = {
-    "PRUSTI_SKIP_UNSUPPORTED_FEATURES": "true",
-    "PRUSTI_INTERNAL_ERRORS_AS_WARNINGS": "true",
     "PRUSTI_QUIET": "true",
     "PRUSTI_FULL_COMPILATION": "true",
     "PRUSTI_CARGO": "",
@@ -496,7 +494,8 @@ def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses
         _worker_local.idx = next(_worker_counter)
     env = os.environ.copy()
     env.update(PRUSTI_ENV)
-    env["PRUSTI_SERVER_ADDRESS"] = server_addresses[_worker_local.idx % len(server_addresses)]
+    if server_addresses:
+        env["PRUSTI_SERVER_ADDRESS"] = server_addresses[_worker_local.idx % len(server_addresses)]
     return _run_prusti(rs_file, prusti_rustc, timeout, env)
 
 
@@ -535,7 +534,10 @@ def cmd_prusti(args):
     server_procs = []
     server_addresses = []
     try:
-        if prusti_server_bin.is_file():
+        if args.server:
+            if not prusti_server_bin.is_file():
+                print(f"Error: prusti-server not found at {prusti_server_bin}", file=sys.stderr)
+                sys.exit(1)
             for i in range(PRUSTI_SERVER_COUNT):
                 port = PRUSTI_SERVER_PORT + i
                 proc = subprocess.Popen(
@@ -548,9 +550,6 @@ def cmd_prusti(args):
             for port in range(PRUSTI_SERVER_PORT, PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT):
                 _wait_for_server(port)
             print(f"Started {PRUSTI_SERVER_COUNT} prusti-server instances (ports {PRUSTI_SERVER_PORT}–{PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT - 1})")
-        else:
-            print(f"Error: prusti-server not found at {prusti_server_bin}", file=sys.stderr)
-            sys.exit(1)
 
         max_workers = PRUSTI_SERVER_COUNT
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -635,7 +634,7 @@ def cmd_full(args):
             db = f"prusti-{Y}{Mo}{D}-{H}{Mi}{S}-{h}.db"
         else:
             db = f"prusti_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.db"
-    cmd_prusti(argparse.Namespace(prusti_rustc=args.prusti_rustc, dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout))
+    cmd_prusti(argparse.Namespace(prusti_rustc=args.prusti_rustc, dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout, server=args.server))
 
 
 def main():
@@ -676,6 +675,7 @@ def main():
     prusti_target.add_argument("--file", help="Single .rs file to verify")
     p_prusti.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
     p_prusti.add_argument("--db", help="Path to SQLite database (default: prusti_<timestamp>.db)")
+    p_prusti.add_argument("--server", action="store_true", help=f"Use prusti-server ({PRUSTI_SERVER_COUNT} instances, one worker each)")
     p_prusti.set_defaults(func=cmd_prusti)
 
     # full subcommand
@@ -685,6 +685,7 @@ def main():
     p_full.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
     p_full.add_argument("--db", help="Path to SQLite database (default: prusti_<timestamp>.db)")
     p_full.add_argument("--noconfirm", action="store_true", help="Skip confirmation prompt before Prusti step")
+    p_full.add_argument("--server", action="store_true", help=f"Use prusti-server ({PRUSTI_SERVER_COUNT} instances, one worker each)")
     p_full.set_defaults(func=cmd_full)
 
     args = parser.parse_args()
