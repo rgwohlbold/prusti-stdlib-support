@@ -77,6 +77,8 @@ def _categorize(
         return "unsupported: CStr constants"
     elif panic_message == "called `Result::unwrap()` on an `Err` value: AlreadyEncoded":
         return "unsupported: recursive struct types"
+    elif panic_message == "not yet implemented" and panic_location == "prusti-encoder/src/encoders/ty/indirect.rs":
+        return "unsupported: enum types in indirect predicate encoder"
 
     # class of errors: constant encoding
     elif first_prusti_frame == "prusti_encoder::encoders::ty::data::TyData<D>::expect_primitive" and panic_message.startswith("expected primitive") and "prusti_encoder::encoders::const::ConstEnc::encode_scalar" in output:
