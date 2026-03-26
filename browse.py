@@ -25,9 +25,12 @@ def _render_markdown(text: str) -> str:
         return f"<pre>{html.escape(text)}</pre>"
 
 
+_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+
 _COMMON_STYLE = """
   body { font-family: sans-serif; margin: 2em; color: #222; }
   h1   { font-size: 1.4em; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { border-collapse: collapse; width: 100%; }
   th, td { border: 1px solid #ddd; padding: 6px 14px; text-align: left; }
   th { background: #f3f3f3; }
@@ -36,6 +39,10 @@ _COMMON_STYLE = """
   a { color: #1a6eb5; }
   a.back { display: inline-block; margin-bottom: 1.5em; text-decoration: none; }
   a.back:hover { text-decoration: underline; }
+  @media (max-width: 600px) {
+    body { margin: 1em; }
+    th, td { padding: 4px 8px; font-size: 0.9em; }
+  }
 """
 
 
@@ -75,7 +82,8 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
         db_cat_maps[name] = cat_map
         all_cats.update(cat_map.keys())
 
-    sorted_cats = sorted(all_cats, key=lambda c: -sum(db_cat_maps[n].get(c, 0) for n in names))
+    last = names[-1]
+    sorted_cats = sorted(all_cats, key=lambda c: -db_cat_maps[last].get(c, 0))
     col_headers = "".join(f"<th>{html.escape(Path(n).stem)}</th>" for n in names)
     compare_rows = []
     for cat in sorted_cats:
@@ -93,21 +101,21 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
     return f"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8">{_VIEWPORT}
 <title>Prusti Analysis</title>
 <style>{_COMMON_STYLE}</style>
 </head>
 <body>
 <h1>Prusti Analysis — Databases</h1>
-<table>
+<div class="table-wrap"><table>
 <tr><th>Database</th><th>Total</th><th>Success</th><th>Fail</th><th>Timeout</th></tr>
 {summary_html}
-</table>
+</table></div>
 <h2>Category comparison</h2>
-<table>
+<div class="table-wrap"><table>
 <tr><th>Category</th>{col_headers}</tr>
 {compare_html}
-</table>
+</table></div>
 </body>
 </html>"""
 
@@ -142,7 +150,7 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
     return f"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8">{_VIEWPORT}
 <title>Prusti Analysis — {html.escape(db_name)}</title>
 <style>{_COMMON_STYLE}
   .summary {{ margin-bottom: 1.5em; color: #555; }}
@@ -157,10 +165,10 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
   Timeout: <b>{timeout}</b>
 </p>
 <h2>Failure categories</h2>
-<table>
+<div class="table-wrap"><table>
 <tr><th>Category</th><th>Count</th></tr>
 {rows_html}
-</table>
+</table></div>
 </body>
 </html>"""
 
@@ -170,19 +178,23 @@ def _issue_page(md_file: Path) -> str:
     return f"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8">{_VIEWPORT}
 <title>{html.escape(md_file.stem)}</title>
 <style>
-  body {{ font-family: sans-serif; max-width: 860px; margin: 2em auto; color: #222; line-height: 1.6; }}
+  body {{ font-family: sans-serif; max-width: 860px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.6; }}
   code {{ background: #f4f4f4; padding: 1px 5px; border-radius: 3px; font-size: .92em; }}
   pre  {{ background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }}
   pre code {{ background: none; padding: 0; }}
-  table {{ border-collapse: collapse; margin: 1em 0; }}
+  table {{ border-collapse: collapse; margin: 1em 0; width: 100%; }}
+  .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
   th, td {{ border: 1px solid #ccc; padding: 4px 12px; }}
   th {{ background: #f3f3f3; }}
   a.back {{ display: inline-block; margin-bottom: 1.5em; color: #1a6eb5; text-decoration: none; }}
   a.back:hover {{ text-decoration: underline; }}
   h1 {{ font-size: 1.5em; }}
+  @media (max-width: 600px) {{
+    body {{ margin: 1em auto; }}
+  }}
 </style>
 </head>
 <body>
