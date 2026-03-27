@@ -301,10 +301,13 @@ def cmd_extract(args):
         if file.endswith('.rs')
     ]
 
+    snippets_before = set(output_dir.glob("*.rs"))
     for file_path in tqdm(rs_files, desc="Extracting", unit="file"):
         process_file(args.library, file_path, output_dir)
+    snippets_after = set(output_dir.glob("*.rs"))
+    n_snippets = len(snippets_after - snippets_before)
 
-    print(f"Done! Scanned {len(rs_files)} Rust files and extracted snippets to {output_dir}")
+    print(f"Done! Scanned {len(rs_files)} Rust files, extracted {n_snippets} snippets to {output_dir}")
 
 
 def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path) -> tuple[bool, str]:
@@ -361,9 +364,10 @@ def cmd_compile(args):
                     failures.append((futures[future], stderr))
                 pbar.update(1)
 
-    for rs_file, stderr in sorted(failures):
-        print(f"\n--- {rs_file.name} ---")
-        print(stderr.strip())
+    if getattr(args, "verbose", False):
+        for rs_file, stderr in sorted(failures):
+            print(f"\n--- {rs_file.name} ---")
+            print(stderr.strip())
 
     print(f"\nDone! {ok} compiled OK, {fail} failed.")
 
@@ -626,10 +630,82 @@ def cmd_prusti(args):
             _kill_server(proc)
 
     conn.close()
+    if getattr(args, "verbose", False):
+        for rs_file, stderr in sorted(failures):
+            print(f"\n--- {rs_file.name} ---")
+            print(stderr.strip())
     print(f"\nDone! {ok} passed, {fail} failed, {timed_out} timed out.")
 
 
+def _snapshot_name(prusti_dir: Path, branch: "str | None") -> tuple[Path, str]:
+    """Compute snapshot (dest, name) from git metadata; also checks for uncommitted changes."""
+    def git(*cmd):
+        return subprocess.run(["git", "-C", str(prusti_dir)] + list(cmd),
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    diff = subprocess.run(["git", "-C", str(prusti_dir), "diff", "--quiet", "--", "HEAD"])
+    if diff.returncode != 0:
+        print(f"Error: tracked files modified in {prusti_dir}; aborting.", file=sys.stderr)
+        sys.exit(1)
+
+    timestamp = git("log", "-1", "--format=%cd", "--date=format:%Y%m%d-%H%M%S")
+    commit_hash = git("rev-parse", "--short=9", "HEAD")
+    prefix = f"{branch}-" if branch else ""
+    name = f"{prefix}{timestamp}-{commit_hash}"
+    return Path(f"./prusti-{name}"), name
+
+
+def _snapshot_do_build(prusti_dir: Path, dest: Path):
+    """Build Prusti and copy artifacts into dest."""
+    print("Updating submodules and building…")
+    (prusti_dir / "prusti" / "src" / "driver.rs").touch()
+    subprocess.run(["git", "-C", str(prusti_dir), "submodule", "update"], check=True)
+    subprocess.run(["./x.py", "build"], cwd=str(prusti_dir), check=True)
+
+    (dest / "deps").mkdir(parents=True, exist_ok=True)
+
+    for bin_name in ["prusti-rustc", "cargo-prusti", "prusti-driver",
+                     "prusti-server", "prusti-server-driver", "prusti-smt-solver"]:
+        shutil.copy2(prusti_dir / "target" / "debug" / bin_name, dest / bin_name)
+
+    for rlib in (prusti_dir / "target" / "verify" / "debug").glob("libprusti_contracts*.rlib"):
+        shutil.copy2(rlib, dest / rlib.name)
+
+    for f in (prusti_dir / "target" / "verify" / "debug" / "deps").iterdir():
+        shutil.copy2(f, dest / "deps" / f.name)
+
+    viper_link = dest / "viper_tools"
+    if viper_link.is_symlink() or viper_link.exists():
+        viper_link.unlink()
+    viper_link.symlink_to(prusti_dir / "viper_tools")
+
+
+def cmd_snapshot(args):
+    prusti_dir = Path(args.prusti_dir).expanduser()
+    if not prusti_dir.is_dir():
+        print(f"Error: prusti directory not found at {prusti_dir}", file=sys.stderr)
+        sys.exit(1)
+    dest, _ = _snapshot_name(prusti_dir, args.branch)
+    _snapshot_do_build(prusti_dir, dest)
+    print(f"Snapshot created at {dest}/")
+
+
 def cmd_full(args):
+    prusti_dir = Path(args.prusti_dir).expanduser()
+    if not prusti_dir.is_dir():
+        print(f"Error: prusti directory not found at {prusti_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    dest, name = _snapshot_name(prusti_dir, args.branch)
+    db = args.db or f"prusti-{name}.db"
+    if Path(db).exists():
+        print(f"Error: database {db} already exists; aborting.", file=sys.stderr)
+        sys.exit(1)
+
+    _snapshot_do_build(prusti_dir, dest)
+    print(f"Snapshot created at {dest}/")
+    prusti_rustc = dest / "prusti-rustc"
+
     clean_passing = args.dest_dir is None
     dest_dir = args.dest_dir or "tests/"
 
@@ -651,7 +727,7 @@ def cmd_full(args):
     for lib in ["alloc", "core"]:
         print(f"=== {lib} ===")
         cmd_extract(argparse.Namespace(library=lib, source_dir=f"{lib}/src/", output_dir=f"{lib}/snippets/"))
-        cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=args.prusti_rustc))
+        cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=str(prusti_rustc), verbose=args.verbose))
         cmd_copy_passing(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", dest_dir=args.dest_dir))
 
     if not args.noconfirm:
@@ -663,18 +739,7 @@ def cmd_full(args):
             if f.is_file():
                 f.unlink()
 
-    if args.db:
-        db = args.db
-    else:
-        r = subprocess.run([args.prusti_rustc, "--version"], capture_output=True, text=True)
-        ver = r.stdout + r.stderr
-        m = re.search(r'commit ([0-9a-f]+) (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})', ver)
-        if m:
-            h, Y, Mo, D, H, Mi, S = m.groups()
-            db = f"prusti-{Y}{Mo}{D}-{H}{Mi}{S}-{h}.db"
-        else:
-            db = f"prusti_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.db"
-    cmd_prusti(argparse.Namespace(prusti_rustc=args.prusti_rustc, dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout, server=args.server))
+    cmd_prusti(argparse.Namespace(prusti_rustc=str(prusti_rustc), dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout, server=args.server, verbose=args.verbose))
 
 
 def main():
@@ -716,17 +781,31 @@ def main():
     p_prusti.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
     p_prusti.add_argument("--db", help="Path to SQLite database (default: prusti_<timestamp>.db)")
     p_prusti.add_argument("--server", action="store_true", help=f"Use prusti-server ({PRUSTI_SERVER_COUNT} instances, one worker each)")
+    p_prusti.add_argument("--verbose", action="store_true", help="Print Prusti output for failed files at the end")
     p_prusti.set_defaults(func=cmd_prusti)
 
+    # compile subcommand (verbose flag)
+    # (p_compile defined above — add verbose there too)
+    p_compile.add_argument("--verbose", action="store_true", help="Print compiler output for failed files")
+
     # full subcommand
-    p_full = subparsers.add_parser("full", help="Extract, compile, and copy passing snippets for alloc+core, then verify with Prusti.")
-    p_full.add_argument("--prusti", required=True, dest="prusti_rustc", help="Path to the prusti-rustc executable")
+    p_full = subparsers.add_parser("full", help="Snapshot Prusti, extract, compile, and verify alloc+core doctests.")
+    p_full.add_argument("--prusti-dir", default="~/prusti-dev", dest="prusti_dir", help="Path to prusti-dev checkout (default: ~/prusti-dev)")
+    p_full.add_argument("--branch", default=None, help="Branch label for snapshot and DB name (e.g. fix_ConstEnc)")
     p_full.add_argument("--passing-dir", default=None, dest="dest_dir", help="Directory to copy passing snippets into (default: tests/, cleaned before use)")
     p_full.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
-    p_full.add_argument("--db", help="Path to SQLite database (default: prusti_<timestamp>.db)")
+    p_full.add_argument("--db", help="Path to SQLite database (default: prusti-<name>.db)")
     p_full.add_argument("--noconfirm", action="store_true", help="Skip confirmation prompt before Prusti step")
-    p_full.add_argument("--server", action="store_true", help=f"Use prusti-server ({PRUSTI_SERVER_COUNT} instances, one worker each)")
-    p_full.set_defaults(func=cmd_full)
+    p_full.add_argument("--noserver", action="store_false", dest="server", help=f"Disable prusti-server (enabled by default, {PRUSTI_SERVER_COUNT} instances)")
+    p_full.add_argument("--verbose", action="store_true", help="Print compiler and Prusti output for failed files")
+    p_full.set_defaults(func=cmd_full, server=True)
+
+    # snapshot subcommand
+    p_snapshot = subparsers.add_parser("snapshot", help="Build Prusti and create a self-contained snapshot directory.")
+    p_snapshot.add_argument("--prusti-dir", default="~/prusti-dev", dest="prusti_dir",
+                            help="Path to prusti-dev checkout (default: ~/progs/prusti-dev)")
+    p_snapshot.add_argument("--branch", default=None, help="Branch label to include in snapshot name (e.g. fix_ConstEnc)")
+    p_snapshot.set_defaults(func=cmd_snapshot)
 
     args = parser.parse_args()
     args.func(args)
