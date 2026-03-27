@@ -626,11 +626,6 @@ def cmd_prusti(args):
             _kill_server(proc)
 
     conn.close()
-
-    for rs_file, stderr in sorted(failures):
-        print(f"\n--- {rs_file.name} ---")
-        print(stderr.strip())
-
     print(f"\nDone! {ok} passed, {fail} failed, {timed_out} timed out.")
 
 
