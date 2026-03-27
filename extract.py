@@ -488,6 +488,17 @@ def _wait_for_server(port: int, timeout: float = 60.0):
     raise TimeoutError(f"prusti-server did not start within {timeout:.0f}s")
 
 
+def _wait_for_port_free(port: int, timeout: float = 30.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("localhost", port), timeout=0.5):
+                time.sleep(0.2)  # still listening, keep waiting
+        except (ConnectionRefusedError, OSError):
+            return  # port is free
+    raise TimeoutError(f"Port {port} not released within {timeout:.0f}s")
+
+
 def _kill_server(proc: "subprocess.Popen[bytes]"):
     """Kill a server process group (prusti-server + prusti-server-driver)."""
     try:
@@ -510,6 +521,7 @@ def _restart_server(server_procs: list, idx: int, prusti_rustc: Path):
     """Kill the server process group at index idx and start a fresh one on the same port."""
     port = PRUSTI_SERVER_PORT + idx
     _kill_server(server_procs[idx])
+    _wait_for_port_free(port)
     server_procs[idx] = _spawn_server(prusti_rustc.parent / "prusti-server", port)
     _wait_for_server(port)
 
