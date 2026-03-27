@@ -730,10 +730,6 @@ def cmd_full(args):
         cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=str(prusti_rustc), verbose=args.verbose))
         cmd_copy_passing(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", dest_dir=args.dest_dir))
 
-    if not args.noconfirm:
-        print("\nReady to launch Prusti verification (time-intensive).")
-        input("Press Enter to continue, or Ctrl+C to abort...")
-
     for lib in ["alloc", "core"]:
         for f in Path(f"{lib}/bin/").glob("*"):
             if f.is_file():
@@ -795,7 +791,6 @@ def main():
     p_full.add_argument("--passing-dir", default=None, dest="dest_dir", help="Directory to copy passing snippets into (default: tests/, cleaned before use)")
     p_full.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
     p_full.add_argument("--db", help="Path to SQLite database (default: prusti-<name>.db)")
-    p_full.add_argument("--noconfirm", action="store_true", help="Skip confirmation prompt before Prusti step")
     p_full.add_argument("--noserver", action="store_false", dest="server", help=f"Disable prusti-server (enabled by default, {PRUSTI_SERVER_COUNT} instances)")
     p_full.add_argument("--verbose", action="store_true", help="Print compiler and Prusti output for failed files")
     p_full.set_defaults(func=cmd_full, server=True)
