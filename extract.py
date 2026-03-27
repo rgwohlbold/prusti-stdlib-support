@@ -26,7 +26,7 @@ _worker_local   = threading.local()
 _worker_counter = itertools.count()
 
 PRUSTI_SERVER_PORT  = 27010
-PRUSTI_SERVER_COUNT = 4
+PRUSTI_SERVER_COUNT = 6
 
 
 def process_file(library: str, file_path: Path, output_dir: Path):
@@ -492,14 +492,43 @@ def _wait_for_server(port: int, timeout: float = 60.0):
     raise TimeoutError(f"prusti-server did not start within {timeout:.0f}s")
 
 
-def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str]) -> tuple[str, str, float]:
+def _kill_server(proc: "subprocess.Popen[bytes]"):
+    """Kill a server process group (prusti-server + prusti-server-driver)."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def _spawn_server(prusti_server_bin: Path, port: int) -> "subprocess.Popen[bytes]":
+    return subprocess.Popen(
+        [str(prusti_server_bin), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _restart_server(server_procs: list, idx: int, prusti_rustc: Path):
+    """Kill the server process group at index idx and start a fresh one on the same port."""
+    port = PRUSTI_SERVER_PORT + idx
+    _kill_server(server_procs[idx])
+    server_procs[idx] = _spawn_server(prusti_rustc.parent / "prusti-server", port)
+    _wait_for_server(port)
+
+
+def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str], server_procs: list) -> tuple[str, str, float]:
     if not hasattr(_worker_local, 'idx'):
         _worker_local.idx = next(_worker_counter)
     env = os.environ.copy()
     env.update(PRUSTI_ENV)
     if server_addresses:
         env["PRUSTI_SERVER_ADDRESS"] = server_addresses[_worker_local.idx % len(server_addresses)]
-    return _run_prusti(rs_file, prusti_rustc, timeout, env)
+    status, stderr, duration = _run_prusti(rs_file, prusti_rustc, timeout, env)
+    if status == "timeout" and server_procs:
+        _restart_server(server_procs, _worker_local.idx % len(server_procs), prusti_rustc)
+    return status, stderr, duration
 
 
 def cmd_prusti(args):
@@ -543,11 +572,7 @@ def cmd_prusti(args):
                 sys.exit(1)
             for i in range(PRUSTI_SERVER_COUNT):
                 port = PRUSTI_SERVER_PORT + i
-                proc = subprocess.Popen(
-                    [str(prusti_server_bin), "--port", str(port)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                proc = _spawn_server(prusti_server_bin, port)
                 server_procs.append(proc)
                 server_addresses.append(f"localhost:{port}")
             for port in range(PRUSTI_SERVER_PORT, PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT):
@@ -557,7 +582,7 @@ def cmd_prusti(args):
         max_workers = PRUSTI_SERVER_COUNT
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses): f
+                executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses, server_procs): f
                 for f in rs_files
             }
             with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
@@ -579,9 +604,7 @@ def cmd_prusti(args):
                     pbar.update(1)
     finally:
         for proc in server_procs:
-            proc.terminate()
-        for proc in server_procs:
-            proc.wait()
+            _kill_server(proc)
 
     conn.close()
 
