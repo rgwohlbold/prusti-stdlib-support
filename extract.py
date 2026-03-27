@@ -4,8 +4,8 @@
 #   "tqdm",
 # ]
 # ///
-import itertools
 import os
+import queue
 import re
 import signal
 import argparse
@@ -15,15 +15,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
-
-_worker_local   = threading.local()
-_worker_counter = itertools.count()
 
 PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = 6
@@ -518,17 +514,22 @@ def _restart_server(server_procs: list, idx: int, prusti_rustc: Path):
     _wait_for_server(port)
 
 
-def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int, server_addresses: list[str], server_procs: list) -> tuple[str, str, float]:
-    if not hasattr(_worker_local, 'idx'):
-        _worker_local.idx = next(_worker_counter)
-    env = os.environ.copy()
-    env.update(PRUSTI_ENV)
-    if server_addresses:
-        env["PRUSTI_SERVER_ADDRESS"] = server_addresses[_worker_local.idx % len(server_addresses)]
-    status, stderr, duration = _run_prusti(rs_file, prusti_rustc, timeout, env)
-    if status == "timeout" and server_procs:
-        _restart_server(server_procs, _worker_local.idx % len(server_procs), prusti_rustc)
-    return status, stderr, duration
+def prusti_one(rs_file: Path, prusti_rustc: Path, timeout: int,
+               server_addresses: list[str], server_procs: list,
+               server_queue: "queue.Queue | None") -> tuple[str, str, float]:
+    idx = server_queue.get() if server_queue is not None else None
+    try:
+        env = os.environ.copy()
+        env.update(PRUSTI_ENV)
+        if idx is not None:
+            env["PRUSTI_SERVER_ADDRESS"] = server_addresses[idx]
+        status, stderr, duration = _run_prusti(rs_file, prusti_rustc, timeout, env)
+        if status == "timeout" and idx is not None:
+            _restart_server(server_procs, idx, prusti_rustc)
+        return status, stderr, duration
+    finally:
+        if server_queue is not None:
+            server_queue.put(idx)
 
 
 def cmd_prusti(args):
@@ -579,10 +580,16 @@ def cmd_prusti(args):
                 _wait_for_server(port)
             print(f"Started {PRUSTI_SERVER_COUNT} prusti-server instances (ports {PRUSTI_SERVER_PORT}–{PRUSTI_SERVER_PORT + PRUSTI_SERVER_COUNT - 1})")
 
+        server_queue: queue.Queue | None = None
+        if server_addresses:
+            server_queue = queue.Queue()
+            for i in range(len(server_addresses)):
+                server_queue.put(i)
+
         max_workers = PRUSTI_SERVER_COUNT
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses, server_procs): f
+                executor.submit(prusti_one, f, prusti_rustc, timeout, server_addresses, server_procs, server_queue): f
                 for f in rs_files
             }
             with tqdm(total=len(rs_files), desc="Prusti", unit="file") as pbar:
