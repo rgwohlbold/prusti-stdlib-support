@@ -18,41 +18,43 @@ Copies `core/` and `alloc/` from a Rust nightly toolchain (default: `nightly-202
 ./snapshot.sh
 ```
 
-Rebuilds the Prusti development tree and copies the resulting debug binaries into a timestamped directory `prusti-<date>-<hash>/`. Aborts if the working tree has uncommitted changes. The snapshot directory is what `extract.py` uses to run verification.
 
-> The path to the Prusti source tree is hard-coded in `snapshot.sh` (`PRUSTI=...`); edit it before first use.
+### 2. Extract and verify
 
-### 3. Extract and verify
+> The path to the Prusti source tree is hard-coded in `extract.py` (`PRUSTI=...`); edit it before first use.
 
 ```bash
-python extract.py full prusti-<date>-<hash>/prusti-rustc
+python extract.py full
 ```
 
 Runs the full pipeline for `core` and `alloc`:
-1. **Extract** — scrapes doctests out of the source into `{lib}/snippets/*.rs`
-2. **Compile** — filters snippets that compile successfully (with Prusti's rustc) into `{lib}/bin/`
-3. **Copy** — collects passing snippets into `tests/`
-4. **Verify** — runs Prusti over all `tests/*.rs` and stores results in a `prusti-*.db` SQLite database
+1. **Snapshot**: compiles Prusti and copies it into a subdirectory
+    - Rebuilds the Prusti development tree and copies the resulting debug binaries into a timestamped directory `prusti-<date>-<hash>/`.
+    - If the path of the Prusti repository is not `~/prusti-dev`, you need to provide the `--prusti` flag.
+    - Aborts if the working tree has uncommitted changes
+    - Use the `--branch` flag to have the snapshot (and later the database) named `prusti-{name}-<date>-<hash>/`
+2. **Extract**: scrapes doctests out of the source into `{lib}/snippets/*.rs`
+3. **Compile**: filters snippets that compile successfully (with Prusti's rustc) into `{lib}/bin/`
+4. **Copy**: collects passing snippets into `tests/`
+5. **Verify**: runs Prusti over all `tests/*.rs` and stores results in a `prusti-*.db` SQLite database
 
-Asks for confirmation before the time-intensive verification step; skip with `--noconfirm`.
+### 3. Analyse results
 
-### 4. Analyse results
+Open `analyze.ipynb` in Jupyter for a breakdown of the current database (success/fail counts, failure categories). 
 
-Open `analyze.ipynb` in Jupyter for a breakdown of the current database (success/fail counts, failure categories). Open `evolution.ipynb` to compare results across multiple database snapshots over time.
+### 4. Browse results
 
-### 5. Browse results
-
-`browse.py` is a small web server that shows the failure category table and renders the issue write-ups from `issues/*.md`:
+`browse.py` generates some HTML files that show the failure category table and renders the issue write-ups from `issues/*.md`:
 
 ```bash
-python browse.py [--db prusti-*.db] [--port 8765]
+python browse.py
 ```
 
 Or run it in Docker:
 
 ```bash
-docker build --build-arg DB_FILE=prusti-20260309-165527-9eba9fcdc.db -t prusti-stdlib-support .
-docker run -p 8765:8765 prusti-stdlib-support
+docker build -t prusti-stdlib-support .
+docker run -p 8080:80 prusti-stdlib-support
 ```
 
-Then open http://localhost:8765. Replace the `DB_FILE` value with whichever `prusti-*.db` file you want to serve.
+Then open http://localhost:8080. 
