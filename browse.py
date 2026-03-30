@@ -8,8 +8,11 @@ Defaults to all prusti-*.db files in the current directory and output to ./stati
 """
 import argparse
 import html
+import re
 import urllib.parse
 from pathlib import Path
+
+_NO_BRANCH_RE = re.compile(r'^prusti-\d{8}-\d{6}-[0-9a-f]+$')
 
 import polars as pl
 import prusti_analysis as pa
@@ -82,8 +85,9 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
         db_cat_maps[name] = cat_map
         all_cats.update(cat_map.keys())
 
-    last = names[-1]
-    sorted_cats = sorted(all_cats, key=lambda c: -db_cat_maps[last].get(c, 0))
+    no_branch = [n for n in names if _NO_BRANCH_RE.match(Path(n).stem)]
+    sort_ref = no_branch[-1] if no_branch else names[-1]
+    sorted_cats = sorted(all_cats, key=lambda c: -db_cat_maps[sort_ref].get(c, 0))
     col_headers = "".join(f"<th>{html.escape(Path(n).stem)}</th>" for n in names)
     compare_rows = []
     for cat in sorted_cats:
