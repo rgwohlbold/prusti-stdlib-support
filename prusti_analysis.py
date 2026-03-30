@@ -7,7 +7,7 @@ import polars as pl
 # ── regex constants ────────────────────────────────────────────────────────────
 const_overflow_re = r"range end index \d+ out of range for slice of length \d+"
 unsupported_mut_ptr_re = r"error: \[Prusti: verification error\] unsupported rvalue &raw (mut|const) [^ ]+ might be reached"
-unsupported_closure_re = r"error: \[Prusti: verification error\] unsupported rvalue {closure@[^}]+} might be reached"
+unsupported_closure_re = r"error: \[Prusti: verification error\] unsupported rvalue {closure@[^}]+} \{[^\}]+\} might be reached"
 c_str_re = r"not yet implemented: ConstValue::Slice: &'\?\d+ std::ffi::CStr"
 index_out_of_bounds_re = r"index out of bounds: the len is \d+ but the index is \d+"
 
@@ -21,6 +21,10 @@ def _categorize(
 ) -> str | None:
     if success != "fail":
         return ""
+    
+    # can occur in panic message and outside
+    if '("wand encoder", "Unsupported(\\"function shape: ContainsAliasType\\")"' in output:
+        return "unsupported: function shapes containing alias types (pcg)"
 
     if panic_message is None:
         if re.search(unsupported_mut_ptr_re, output):
@@ -29,6 +33,10 @@ def _categorize(
             return "unsupported: closure rvalue might be reached (no crash)"
         elif "error: [Prusti: verification error] operation may overflow" in output:
             return "success: potential overflow (no crash)"
+        elif 'consistency error: ConsistencyError { message: "Consistency error: Duplicate identifier' in output:
+            return "bug: duplicate identifier in consistency check"
+        elif 'consistency error: ConsistencyError { message: "Consistency error: Local variable' in output:
+            return "bug: local variable not found in consistency check"
         return "other"
 
     # all cases with panic messages
@@ -46,8 +54,6 @@ def _categorize(
         return "unsupported: unsizing of other types than refs to arrays"
     elif panic_location == "prusti-encoder/src/encoders/ty/indirect.rs" and first_prusti_frame == "prusti_encoder::encoders::impure::fn_wand::WandEncOutput::encode_predicates_for_function_shape_node" and panic_message == "called `Option::unwrap()` on a `None` value":
         return "bug: lifetime-annotated structs"
-    elif '("wand encoder", "Unsupported(\\"function shape: ContainsAliasType\\")"' in panic_message:
-        return "unsupported: function shapes containing alias types (pcg)"
     elif '("wand encoder", "Unsupported(\\"function shape: CheckOutlivesError(CannotCompareRegions' in panic_message:
         return "unsupported: function shapes with incomparable regions (pcg)"
     elif panic_message.startswith("not implemented: ty_name for Coroutine"):
