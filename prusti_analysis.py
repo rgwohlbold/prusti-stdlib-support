@@ -85,6 +85,8 @@ def _categorize(
         return "unsupported: recursive struct types"
     elif panic_message == "not yet implemented" and panic_location == "prusti-encoder/src/encoders/ty/indirect.rs":
         return "unsupported: enum types in indirect predicate encoder"
+    elif panic_message == "not yet implemented: unsizing with unsupported types":
+        return "unsupported: unsizing of other types than refs to arrays"
 
     # class of errors: constant encoding
     elif first_prusti_frame == "prusti_encoder::encoders::ty::data::TyData<D>::expect_primitive" and panic_message.startswith("expected primitive") and "prusti_encoder::encoders::const::ConstEnc::encode_scalar" in output:
