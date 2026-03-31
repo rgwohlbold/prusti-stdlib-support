@@ -34,9 +34,9 @@ def process_file(library: str, file_path: Path, output_dir: Path):
     has_doc_attr_in_block = False
     doc_attr_depth = 0   # bracket depth for multiline #[doc = concat!(...\n...)] attrs
     current_block = []
-    block_counter = 0
+    block_start_line = 0
 
-    for line in lines:
+    for line_no, line in enumerate(lines, 1):
         stripped_line = line.strip()
 
         # Check if the line is a documentation comment
@@ -57,11 +57,13 @@ def process_file(library: str, file_path: Path, output_dir: Path):
                     attributes = re.split(r'[,\s]+', doc_content[3:].strip())
                     # Ignore blocks that aren't valid, compiling Rust code
                     invalid_attrs = {
-                        'ignore', 'compile_fail', 'should_panic', 'no_run',
-                        'standalone_crate', 'text', 'test', 'no_rust', 'not_rust',
-                        'asm', 'bash', 'sh', 'shell', 'console', 'c', 'c++', 'error',
+                        'ignore', 'compile_fail', 'should_panic', 'should_fail',
+                        'no_run', 'standalone_crate', 'text', 'test', 'no_rust',
+                        'not_rust', 'asm', 'bash', 'sh', 'shell', 'console',
+                        'c', 'c++', 'error',
                     }
                     skip_current_block = any(attr.strip() in invalid_attrs for attr in attributes)
+                    block_start_line = line_no
                 else:
                     # END OF BLOCK
                     in_code_block = False
@@ -69,8 +71,7 @@ def process_file(library: str, file_path: Path, output_dir: Path):
                     # Such lines carry code we can't evaluate (e.g. concat!(...)),
                     # so the extracted snippet would be incomplete.
                     if not skip_current_block and not has_doc_attr_in_block and current_block:
-                        save_snippet(library, file_path, block_counter, current_block, output_dir)
-                        block_counter += 1
+                        save_snippet(library, file_path, block_start_line, current_block, output_dir)
                         current_block = []
                     skip_current_block = False
                     has_doc_attr_in_block = False
@@ -203,7 +204,13 @@ def _has_top_level_question_op(body_content: str) -> bool:
     return False
 
 
-def save_snippet(library: str, original_file: Path, index: int, lines: list, output_dir: Path):
+_RUSTDOC_CRATE_ALLOW = {
+    "core": "#![allow(dead_code, deprecated, unused_variables, unused_mut)]",
+    "alloc": "#![allow(unused_variables)]",
+}
+
+
+def save_snippet(library: str, original_file: Path, line_no: int, lines: list, output_dir: Path):
     lines = _remove_prusti_injected_features(lines)
     content = "\n".join(lines)
 
@@ -229,7 +236,7 @@ def save_snippet(library: str, original_file: Path, index: int, lines: list, out
                     in_inner_attr = True
             else:
                 body_lines.append(l)
-        prefix = "\n".join(inner_attrs) + "\n" if inner_attrs else ""
+        prefix = "\n".join(inner_attrs) + "\n\n" if inner_attrs else ""
 
         # Hoist top-level items (fn, struct, enum, impl, trait) outside main().
         outer_lines, body_lines = _split_outer_items(body_lines)
@@ -276,8 +283,22 @@ def save_snippet(library: str, original_file: Path, index: int, lines: list, out
         else:
             content = prefix + outer_prefix + "fn main() {\n" + indented + "\n}"
 
+    allow = _RUSTDOC_CRATE_ALLOW.get(library, "")
+    if allow:
+        content = allow + "\n" + content
+
     # Create a safe filename based on the original file path
-    safe_filename = f"{library}_{original_file.stem}_doctest_{index}.rs"
+    # Use full relative path to avoid collisions (e.g. different mod.rs files)
+    parts = original_file.parts
+    # Find last "src" in path (avoids matching rustlib/src in toolchain paths)
+    src_indices = [i for i, p in enumerate(parts) if p == "src"]
+    if src_indices:
+        rel = "/".join(parts[src_indices[-1] + 1:])
+    else:
+        rel = original_file.name
+    rel = rel.rsplit(".", 1)[0] if "." in rel else rel
+    path_part = rel.replace("/", "_")
+    safe_filename = f"{library}_{path_part}_doctest_{line_no}.rs"
     out_path = output_dir / safe_filename
 
     with open(out_path, 'w', encoding='utf-8') as f:
