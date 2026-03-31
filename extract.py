@@ -4,6 +4,7 @@
 #   "tqdm",
 # ]
 # ///
+import json
 import os
 import queue
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -25,88 +27,25 @@ PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = 6
 
 
-def process_file(library: str, file_path: Path, output_dir: Path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+def _remove_prusti_injected_features(lines: list[str]) -> list[str]:
+    """Strip feature flags that Prusti always injects via -Zcrate-attr.
 
-    in_code_block = False
-    skip_current_block = False
-    has_doc_attr_in_block = False
-    doc_attr_depth = 0   # bracket depth for multiline #[doc = concat!(...\n...)] attrs
-    current_block = []
-    block_start_line = 0
-
-    for line_no, line in enumerate(lines, 1):
-        stripped_line = line.strip()
-
-        # Check if the line is a documentation comment
-        if stripped_line.startswith('///') or stripped_line.startswith('//!'):
-            # Remove the doc comment prefix (/// or //! and up to one space)
-            doc_content = re.sub(r'^(///|//!)\s?', '', stripped_line)
-
-            # Check for the start or end of a markdown code block
-            if doc_content.startswith('```'):
-                if not in_code_block:
-                    # START OF BLOCK
-                    # Always mark in_code_block so the closing fence is recognised
-                    # even for blocks we're going to skip.
-                    in_code_block = True
-                    has_doc_attr_in_block = False
-                    current_block = []
-                    # Fence attributes can be comma- or space-separated (or both).
-                    attributes = re.split(r'[,\s]+', doc_content[3:].strip())
-                    # Ignore blocks that aren't valid, compiling Rust code
-                    invalid_attrs = {
-                        'ignore', 'compile_fail', 'should_panic', 'should_fail',
-                        'no_run', 'standalone_crate', 'text', 'test', 'no_rust',
-                        'not_rust', 'asm', 'bash', 'sh', 'shell', 'console',
-                        'c', 'c++', 'error',
-                    }
-                    skip_current_block = any(attr.strip() in invalid_attrs for attr in attributes)
-                    block_start_line = line_no
-                else:
-                    # END OF BLOCK
-                    in_code_block = False
-                    # Only save if the block had no #[doc = ...] lines inside it.
-                    # Such lines carry code we can't evaluate (e.g. concat!(...)),
-                    # so the extracted snippet would be incomplete.
-                    if not skip_current_block and not has_doc_attr_in_block and current_block:
-                        save_snippet(library, file_path, block_start_line, current_block, output_dir)
-                        current_block = []
-                    skip_current_block = False
-                    has_doc_attr_in_block = False
-
-            elif in_code_block and not skip_current_block:
-                # Handle rustdoc hidden lines (lines starting with '# ' or just '#'),
-                # which may be indented, so check the lstripped content.
-                stripped_doc = doc_content.lstrip()
-                leading = doc_content[:len(doc_content) - len(stripped_doc)]
-                if stripped_doc.startswith('# '):
-                    current_block.append(leading + stripped_doc[2:])
-                elif stripped_doc == '#':
-                    current_block.append("")
-                else:
-                    current_block.append(doc_content)
-        else:
-            # #[doc = ...] attributes are doc content written as attributes rather
-            # than /// comments (common with concat! in macro-generated docs).
-            # Don't reset block state for them — they often appear between ``` fences
-            # and treating them as "normal code" turns the next closing ``` into a
-            # spurious opener that scoops up prose.
-            if re.match(r'\s*#\[doc\s*=', stripped_line) or doc_attr_depth > 0:
-                # This is either the opening line of a #[doc = ...] attribute or a
-                # continuation line of a multiline one. Track bracket depth so we
-                # know when the attribute closes and don't reset block state for any
-                # of these lines.
-                if in_code_block:
-                    has_doc_attr_in_block = True
-                doc_attr_depth += stripped_line.count('[') - stripped_line.count(']')
-                doc_attr_depth = max(doc_attr_depth, 0)
-            else:
-                # If we hit normal code, reset block state just in case of malformed docs
-                in_code_block = False
-                skip_current_block = False
-                current_block = []
+    Prusti injects stmt_expr_attributes, so snippets that already declare it
+    would trigger E0636 (feature already enabled) during the pre-check.
+    """
+    result = []
+    for line in lines:
+        if re.search(r'#!\[feature\(', line) and 'stmt_expr_attributes' in line:
+            # Remove the entry together with any trailing ", " (when first/middle)
+            new = re.sub(r'\bstmt_expr_attributes\s*,\s*', '', line)
+            # …or any leading ", " (when last) or alone (no comma)
+            new = re.sub(r',?\s*\bstmt_expr_attributes\b', '', new)
+            # Drop the whole line if the feature list is now empty
+            if re.search(r'#!\[feature\(\s*\)\]', new):
+                continue
+            line = new
+        result.append(line)
+    return result
 
 
 # Matches the start of a top-level item that must live outside fn main().
@@ -162,27 +101,6 @@ def _split_outer_items(lines: list) -> tuple[list, list]:
     return outer, lines[i:]
 
 
-def _remove_prusti_injected_features(lines: list[str]) -> list[str]:
-    """Strip feature flags that Prusti always injects via -Zcrate-attr.
-
-    Prusti injects stmt_expr_attributes, so snippets that already declare it
-    would trigger E0636 (feature already enabled) during the pre-check.
-    """
-    result = []
-    for line in lines:
-        if re.search(r'#!\[feature\(', line) and 'stmt_expr_attributes' in line:
-            # Remove the entry together with any trailing ", " (when first/middle)
-            new = re.sub(r'\bstmt_expr_attributes\s*,\s*', '', line)
-            # …or any leading ", " (when last) or alone (no comma)
-            new = re.sub(r',?\s*\bstmt_expr_attributes\b', '', new)
-            # Drop the whole line if the feature list is now empty
-            if re.search(r'#!\[feature\(\s*\)\]', new):
-                continue
-            line = new
-        result.append(line)
-    return result
-
-
 def _has_top_level_question_op(body_content: str) -> bool:
     """Return True if body_content contains a ? operator at brace-depth 0.
 
@@ -204,131 +122,131 @@ def _has_top_level_question_op(body_content: str) -> bool:
     return False
 
 
-_RUSTDOC_CRATE_ALLOW = {
-    "core": "#![allow(dead_code, deprecated, unused_variables, unused_mut)]",
-    "alloc": "#![allow(unused_variables)]",
-}
+def _wrap_snippet(crate_level: str, code_lines: list[str]) -> str:
+    """Wrap doctest code with fn main(), hoisting outer items and handling ?."""
+    crate_level_lines = _remove_prusti_injected_features(crate_level.split("\n"))
+    prefix = "\n".join(crate_level_lines)
+    # Strip leading blank lines but preserve trailing ones (separator before code)
+    prefix = prefix.lstrip("\n")
+    if not prefix.strip():
+        prefix = ""
 
+    # Hoist top-level items (fn, struct, enum, impl, trait, use) outside main().
+    outer_lines, body_lines = _split_outer_items(code_lines)
+    outer_prefix = "\n".join(outer_lines) + "\n" if outer_lines else ""
 
-def save_snippet(library: str, original_file: Path, line_no: int, lines: list, output_dir: Path):
-    lines = _remove_prusti_injected_features(lines)
-    content = "\n".join(lines)
+    indented = "\n".join("    " + l for l in body_lines)
+    body_content = "\n".join(body_lines)
 
-    # Rustdoc auto-wraps code in a main function if fn main is not already defined.
-    if not re.search(r'\bfn\s+main\s*\(', content):
-        # #![...] inner attributes must stay at crate root, outside fn main.
-        # They may span multiple lines (e.g. #![feature(\n    foo,\n    bar,\n)]),
-        # so track bracket depth rather than checking each line in isolation.
-        inner_attrs, body_lines = [], []
-        depth = 0
-        in_inner_attr = False
-        for l in lines:
-            s = l.strip()
-            if in_inner_attr:
-                inner_attrs.append(l)
-                depth += s.count('[') - s.count(']')
-                if depth <= 0:
-                    in_inner_attr = False
-            elif s.startswith('#!['):
-                inner_attrs.append(l)
-                depth = s.count('[') - s.count(']')
-                if depth > 0:
-                    in_inner_attr = True
-            else:
-                body_lines.append(l)
-        prefix = "\n".join(inner_attrs) + "\n\n" if inner_attrs else ""
-
-        # Hoist top-level items (fn, struct, enum, impl, trait) outside main().
-        outer_lines, body_lines = _split_outer_items(body_lines)
-        outer_prefix = "\n".join(outer_lines) + "\n" if outer_lines else ""
-
-        indented = "\n".join("    " + l for l in body_lines)
-        body_content = "\n".join(body_lines)
-        # Detect a genuine top-level ? operator (not inside a nested fn/closure
-        # or a string literal).  Strip double-quoted strings first, then check
-        # for ? only at brace-depth 0 (excluding format specifiers :? / :#?).
-        uses_question_op = _has_top_level_question_op(body_content)
-        # Check if the last expression is already Ok/Err (with or without `?`).
-        # Such snippets need a Result-returning main even without `?`.
-        last_line = next((l.strip() for l in reversed(body_lines) if l.strip()), "")
-        already_has_ok = (
-            bool(re.search(r'\bOk\b|\bErr\b', last_line))
-            and not last_line.endswith((';', '}'))
-        )
-        if uses_question_op or already_has_ok:
-            if already_has_ok and uses_question_op:
-                # Both: a genuine top-level ? constrains E, and the body already
-                # ends with Ok/Err.  Use impl Debug so non-Error types (e.g.
-                # Box<dyn Any + Send> from JoinHandle::join) are accepted.
-                return_sig = "impl core::fmt::Debug"
-                ok_suffix = ""
-            elif already_has_ok:
-                # No top-level ?: E is unconstrained; use a concrete return type
-                # and normalise the last expression to plain Ok(()) to avoid
-                # type-inference ambiguity.
-                last_idx = next(i for i in range(len(body_lines) - 1, -1, -1) if body_lines[i].strip())
-                body_lines = body_lines[:last_idx] + ["Ok(())"]
-                indented = "\n".join("    " + l for l in body_lines)
-                return_sig = "Box<dyn std::error::Error>"
-                ok_suffix = ""
-            else:
-                # uses_question_op only: genuine top-level ? is present, body
-                # does not end with Ok/Err.  Use impl Debug so non-Error types
-                # are accepted; E is inferred from the ? usages.
-                return_sig = "impl core::fmt::Debug"
-                ok_suffix = "\n    Ok(())"
-            content = (prefix + outer_prefix
-                + f"fn main() -> Result<(), {return_sig}> {{\n"
-                + indented + ok_suffix + "\n}")
+    uses_question_op = _has_top_level_question_op(body_content)
+    last_line = next((l.strip() for l in reversed(body_lines) if l.strip()), "")
+    already_has_ok = (
+        bool(re.search(r'\bOk\b|\bErr\b', last_line))
+        and not last_line.endswith((';', '}'))
+    )
+    if uses_question_op or already_has_ok:
+        if already_has_ok and uses_question_op:
+            return_sig = "impl core::fmt::Debug"
+            ok_suffix = ""
+        elif already_has_ok:
+            last_idx = next(i for i in range(len(body_lines) - 1, -1, -1) if body_lines[i].strip())
+            body_lines = body_lines[:last_idx] + ["Ok(())"]
+            indented = "\n".join("    " + l for l in body_lines)
+            return_sig = "Box<dyn std::error::Error>"
+            ok_suffix = ""
         else:
-            content = prefix + outer_prefix + "fn main() {\n" + indented + "\n}"
-
-    allow = _RUSTDOC_CRATE_ALLOW.get(library, "")
-    if allow:
-        content = allow + "\n" + content
-
-    # Create a safe filename based on the original file path
-    # Use full relative path to avoid collisions (e.g. different mod.rs files)
-    parts = original_file.parts
-    # Find last "src" in path (avoids matching rustlib/src in toolchain paths)
-    src_indices = [i for i, p in enumerate(parts) if p == "src"]
-    if src_indices:
-        rel = "/".join(parts[src_indices[-1] + 1:])
+            return_sig = "impl core::fmt::Debug"
+            ok_suffix = "\n    Ok(())"
+        return (prefix + outer_prefix
+            + f"fn main() -> Result<(), {return_sig}> {{\n"
+            + indented + ok_suffix + "\n}")
     else:
-        rel = original_file.name
-    rel = rel.rsplit(".", 1)[0] if "." in rel else rel
-    path_part = rel.replace("/", "_")
-    safe_filename = f"{library}_{path_part}_doctest_{line_no}.rs"
-    out_path = output_dir / safe_filename
-
-    with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+        return prefix + outer_prefix + "fn main() {\n" + indented + "\n}"
 
 
 def cmd_extract(args):
-    source_dir = Path(args.source_dir)
+    src_dir = Path(args.source_dir)
     output_dir = Path(args.output_dir)
+    library = args.library
 
-    if not source_dir.is_dir():
-        print(f"Error: Source directory {source_dir} does not exist.")
+    if not src_dir.is_dir():
+        print(f"Error: Source directory {src_dir} does not exist.")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rs_files = [
-        Path(root) / file
-        for root, _, files in os.walk(source_dir)
-        for file in files
-        if file.endswith('.rs')
-    ]
+    result = subprocess.run(
+        ["cargo", "rustdoc", "--", "-Zunstable-options", "--output-format=doctest"],
+        capture_output=True, text=True, cwd=str(src_dir),
+    )
+    if result.returncode != 0:
+        print(f"Error: cargo rustdoc failed:\n{result.stderr}", file=sys.stderr)
+        sys.exit(1)
 
-    snippets_before = set(output_dir.glob("*.rs"))
-    for file_path in tqdm(rs_files, desc="Extracting", unit="file"):
-        process_file(args.library, file_path, output_dir)
-    snippets_after = set(output_dir.glob("*.rs"))
-    n_snippets = len(snippets_after - snippets_before)
+    data = json.loads(result.stdout)
+    doctests = data["doctests"]
 
-    print(f"Done! Scanned {len(rs_files)} Rust files, extracted {n_snippets} snippets to {output_dir}")
+    seen = set()
+    n_written = 0
+    for dt in doctests:
+        attrs = dt["doctest_attributes"]
+        if attrs["should_panic"] or attrs["no_run"] or attrs["compile_fail"]:
+            continue
+        if attrs["standalone_crate"]:
+            continue
+        if attrs["ignore"] != "None":
+            continue
+        if not attrs["rust"]:
+            continue
+        if dt["doctest_code"] is None:
+            continue
+
+        file_path = dt["file"]
+        line = dt["line"]
+
+        # Skip external packages (file paths containing ..)
+        if ".." in file_path:
+            continue
+
+        # Dedup by (file, line) — keep first macro expansion per template
+        key = (file_path, line)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        dc = dt["doctest_code"]
+        crate_level = dc["crate_level"]
+        code = dc["code"]
+        wrapper = dc["wrapper"]
+
+        # Strip #![deny(warnings)] — Prusti controls its own warning policy
+        crate_level = crate_level.replace("#![deny(warnings)]\n", "")
+
+        if wrapper is not None:
+            # Hoist outer items and wrap with fn main() + indentation
+            full_code = _wrap_snippet(crate_level, code.split("\n"))
+        else:
+            # Code already defines fn main — just prepend crate-level attrs
+            lines = (crate_level + code).split("\n")
+            lines = _remove_prusti_injected_features(lines)
+            full_code = "\n".join(lines)
+
+        # Build filename: {library}_{path_part}_doctest_{line}.rs
+        rel = file_path
+        pfx = f"{library}/src/"
+        if rel.startswith(pfx):
+            rel = rel[len(pfx):]
+        rel = rel.rsplit(".", 1)[0] if "." in rel else rel
+        path_part = rel.replace("/", "_")
+
+        safe_filename = f"{library}_{path_part}_doctest_{line}.rs"
+        out_path = output_dir / safe_filename
+
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write(full_code)
+        n_written += 1
+
+    print(f"Done! Extracted {n_written} snippets to {output_dir}")
 
 
 def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path) -> tuple[bool, str]:
@@ -711,6 +629,19 @@ def cmd_snapshot(args):
     print(f"Snapshot created at {dest}/")
 
 
+def _get_toolchain_sysroot(prusti_dir: Path) -> Path:
+    """Read rust-toolchain TOML and return the sysroot for the specified channel."""
+    toolchain_file = prusti_dir / "rust-toolchain"
+    with open(toolchain_file, "rb") as f:
+        data = tomllib.load(f)
+    channel = data["toolchain"]["channel"]
+    result = subprocess.run(
+        ["rustc", f"+{channel}", "--print", "sysroot"],
+        capture_output=True, text=True, check=True,
+    )
+    return Path(result.stdout.strip())
+
+
 def cmd_full(args):
     prusti_dir = Path(args.prusti_dir).expanduser()
     if not prusti_dir.is_dir():
@@ -745,9 +676,12 @@ def cmd_full(args):
                     if f.is_file():
                         f.unlink()
 
+    sysroot = _get_toolchain_sysroot(prusti_dir)
+    lib_base = sysroot / "lib" / "rustlib" / "src" / "rust" / "library"
+
     for lib in ["alloc", "core"]:
         print(f"=== {lib} ===")
-        cmd_extract(argparse.Namespace(library=lib, source_dir=f"{lib}/src/", output_dir=f"{lib}/snippets/"))
+        cmd_extract(argparse.Namespace(library=lib, source_dir=str(lib_base / lib), output_dir=f"{lib}/snippets/"))
         cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=str(prusti_rustc), verbose=args.verbose))
         cmd_copy_passing(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", dest_dir=args.dest_dir))
 
@@ -765,7 +699,7 @@ def main():
 
     # extract subcommand
     p_extract = subparsers.add_parser("extract", help="Extract doctests from Rust source files.")
-    p_extract.add_argument("--src-dir", required=True, dest="source_dir", help="Path to the Rust source directory (e.g., src/)")
+    p_extract.add_argument("--src-dir", required=True, dest="source_dir", help="Path to the library's Cargo project directory (e.g., toolchain library/core)")
     p_extract.add_argument("--snippets-dir", required=True, dest="output_dir", help="Directory to write extracted .rs snippets into")
     p_extract.add_argument("--library", required=True, dest="library", help="Name of the library, e.g. 'core' or 'alloc'")
     p_extract.set_defaults(func=cmd_extract)
