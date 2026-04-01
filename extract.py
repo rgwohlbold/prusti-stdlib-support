@@ -4,10 +4,8 @@
 #   "tqdm",
 # ]
 # ///
-import json
 import os
 import queue
-import re
 import signal
 import argparse
 import shutil
@@ -27,141 +25,7 @@ PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = 6
 
 
-def _remove_prusti_injected_features(lines: list[str]) -> list[str]:
-    """Strip feature flags that Prusti always injects via -Zcrate-attr.
-
-    Prusti injects stmt_expr_attributes, so snippets that already declare it
-    would trigger E0636 (feature already enabled) during the pre-check.
-    """
-    result = []
-    for line in lines:
-        if re.search(r'#!\[feature\(', line) and 'stmt_expr_attributes' in line:
-            # Remove the entry together with any trailing ", " (when first/middle)
-            new = re.sub(r'\bstmt_expr_attributes\s*,\s*', '', line)
-            # …or any leading ", " (when last) or alone (no comma)
-            new = re.sub(r',?\s*\bstmt_expr_attributes\b', '', new)
-            # Drop the whole line if the feature list is now empty
-            if re.search(r'#!\[feature\(\s*\)\]', new):
-                continue
-            line = new
-        result.append(line)
-    return result
-
-
-# Matches the start of a top-level item that must live outside fn main().
-# Covers optional visibility (pub, pub(crate), …) and qualifiers (async, unsafe).
-_OUTER_ITEM_RE = re.compile(
-    r'^(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:async|unsafe|default)\s+)*'
-    r'(?:extern "C" fn|fn|struct|enum|impl|trait)\b'
-)
-
-
-def _split_outer_items(lines: list) -> tuple[list, list]:
-    """Split lines into (outer_lines, body_lines).
-
-    Assumes outer items come first. Scans forward collecting blank lines,
-    comments, attributes, use statements, and item definitions (tracking brace
-    depth). Switches to body mode at the first line that is clearly a statement.
-    Returns flat line lists; outer_lines preserves original whitespace/comments.
-    """
-    outer: list[str] = []
-    i = 0
-    depth = 0
-    in_item = False
-    seen_brace = False  # whether we've seen the opening '{' of the current item
-
-    while i < len(lines):
-        line = lines[i]
-        s = line.strip()
-        if in_item:
-            outer.append(line)
-            depth += s.count('{') - s.count('}')
-            if depth > 0:
-                seen_brace = True
-            # Item is complete when braces balance AND we've seen the opening
-            # brace (rules out where-clause lines which also have depth 0).
-            if depth <= 0 and (seen_brace or s.endswith(';')):
-                in_item = False
-                seen_brace = False
-                depth = 0
-        elif not s or s.startswith('//') or (s.startswith('#[') and s.count('{') <= s.count('}')) or s.startswith('use ') or _OUTER_ITEM_RE.match(s):
-            outer.append(line)
-            if s.startswith('use ') or _OUTER_ITEM_RE.match(s):
-                depth = s.count('{') - s.count('}')
-                if depth > 0:
-                    seen_brace = True
-                # Enter multi-line mode unless the item is already complete
-                # (depth back to 0 and ends with '}' or ';').
-                if depth > 0 or not (s.endswith('}') or s.endswith(';')):
-                    in_item = True
-        else:
-            break  # first real statement — switch to body
-        i += 1
-
-    return outer, lines[i:]
-
-
-def _has_top_level_question_op(body_content: str) -> bool:
-    """Return True if body_content contains a ? operator at brace-depth 0.
-
-    Strips double-quoted string literals first (e.g. "what?!!") and only
-    counts ? at depth 0 so that ? inside nested fns or closures is ignored.
-    Excludes format specifiers :? and :#?.
-    """
-    stripped = re.sub(r'"([^"\\]|\\.)*"', '""', body_content)
-    depth = 0
-    prev = ''
-    for c in stripped:
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth = max(depth - 1, 0)
-        elif c == '?' and depth == 0 and prev not in (':', '#'):
-            return True
-        prev = c
-    return False
-
-
-def _wrap_snippet(crate_level: str, code_lines: list[str]) -> str:
-    """Wrap doctest code with fn main(), hoisting outer items and handling ?."""
-    crate_level_lines = _remove_prusti_injected_features(crate_level.split("\n"))
-    prefix = "\n".join(crate_level_lines)
-    # Strip leading blank lines but preserve trailing ones (separator before code)
-    prefix = prefix.lstrip("\n")
-    if not prefix.strip():
-        prefix = ""
-
-    # Hoist top-level items (fn, struct, enum, impl, trait, use) outside main().
-    outer_lines, body_lines = _split_outer_items(code_lines)
-    outer_prefix = "\n".join(outer_lines) + "\n" if outer_lines else ""
-
-    indented = "\n".join("    " + l for l in body_lines)
-    body_content = "\n".join(body_lines)
-
-    uses_question_op = _has_top_level_question_op(body_content)
-    last_line = next((l.strip() for l in reversed(body_lines) if l.strip()), "")
-    already_has_ok = (
-        bool(re.search(r'\bOk\b|\bErr\b', last_line))
-        and not last_line.endswith((';', '}'))
-    )
-    if uses_question_op or already_has_ok:
-        if already_has_ok and uses_question_op:
-            return_sig = "impl core::fmt::Debug"
-            ok_suffix = ""
-        elif already_has_ok:
-            last_idx = next(i for i in range(len(body_lines) - 1, -1, -1) if body_lines[i].strip())
-            body_lines = body_lines[:last_idx] + ["Ok(())"]
-            indented = "\n".join("    " + l for l in body_lines)
-            return_sig = "Box<dyn std::error::Error>"
-            ok_suffix = ""
-        else:
-            return_sig = "impl core::fmt::Debug"
-            ok_suffix = "\n    Ok(())"
-        return (prefix + outer_prefix
-            + f"fn main() -> Result<(), {return_sig}> {{\n"
-            + indented + ok_suffix + "\n}")
-    else:
-        return prefix + outer_prefix + "fn main() {\n" + indented + "\n}"
+DOCTEST_PROCESSOR = Path(__file__).parent / "doctest-processor" / "target" / "release" / "doctest-processor"
 
 
 def cmd_extract(args):
@@ -173,86 +37,26 @@ def cmd_extract(args):
         print(f"Error: Source directory {src_dir} does not exist.")
         return
 
+    print("Building doctest-processor...", file=sys.stderr)
+    subprocess.run(
+        ["cargo", "build", "--release"],
+        cwd=DOCTEST_PROCESSOR.parent.parent.parent,
+        check=True,
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
-        ["cargo", "rustdoc", "--", "-Zunstable-options", "--output-format=doctest"],
-        capture_output=True, text=True, cwd=str(src_dir),
+        [str(DOCTEST_PROCESSOR), "--src-dir", str(src_dir), "--snippets-dir", str(output_dir), "--library", library],
     )
     if result.returncode != 0:
-        print(f"Error: cargo rustdoc failed:\n{result.stderr}", file=sys.stderr)
         sys.exit(1)
-
-    data = json.loads(result.stdout)
-    doctests = data["doctests"]
-
-    seen = set()
-    n_written = 0
-    for dt in doctests:
-        attrs = dt["doctest_attributes"]
-        if attrs["should_panic"] or attrs["no_run"] or attrs["compile_fail"]:
-            continue
-        if attrs["standalone_crate"]:
-            continue
-        if attrs["ignore"] != "None":
-            continue
-        if not attrs["rust"]:
-            continue
-        if dt["doctest_code"] is None:
-            continue
-
-        file_path = dt["file"]
-        line = dt["line"]
-
-        # Skip external packages (file paths containing ..)
-        if ".." in file_path:
-            continue
-
-        # Dedup by (file, line) — keep first macro expansion per template
-        key = (file_path, line)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        dc = dt["doctest_code"]
-        crate_level = dc["crate_level"]
-        code = dc["code"]
-        wrapper = dc["wrapper"]
-
-        # Strip #![deny(warnings)] — Prusti controls its own warning policy
-        crate_level = crate_level.replace("#![deny(warnings)]\n", "")
-
-        if wrapper is not None:
-            # Hoist outer items and wrap with fn main() + indentation
-            full_code = _wrap_snippet(crate_level, code.split("\n"))
-        else:
-            # Code already defines fn main — just prepend crate-level attrs
-            lines = (crate_level + code).split("\n")
-            lines = _remove_prusti_injected_features(lines)
-            full_code = "\n".join(lines)
-
-        # Build filename: {library}_{path_part}_doctest_{line}.rs
-        rel = file_path
-        pfx = f"{library}/src/"
-        if rel.startswith(pfx):
-            rel = rel[len(pfx):]
-        rel = rel.rsplit(".", 1)[0] if "." in rel else rel
-        path_part = rel.replace("/", "_")
-
-        safe_filename = f"{library}_{path_part}_doctest_{line}.rs"
-        out_path = output_dir / safe_filename
-
-        with open(out_path, 'w', encoding='utf-8') as f:
-            f.write(full_code)
-        n_written += 1
-
-    print(f"Done! Extracted {n_written} snippets to {output_dir}")
 
 
 def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path) -> tuple[bool, str]:
     out_bin = bin_dir / rs_file.stem
     result = subprocess.run(
-        ["rustc", "+nightly", "--edition", "2021", str(rs_file), "-o", str(out_bin)],
+        ["rustc", "+nightly", "--edition", "2021", "-Zcrate-attr=feature(stmt_expr_attributes)", str(rs_file), "-o", str(out_bin)],
         capture_output=True,
         text=True,
     )
