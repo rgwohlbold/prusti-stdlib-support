@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use syn::{AttrStyle, File as SynFile, Item, Stmt};
+use syn::{AttrStyle, File as SynFile};
 
 #[derive(Deserialize)]
 struct RustdocOutput {
@@ -46,6 +46,8 @@ struct DoctestCode {
 
 #[derive(Deserialize)]
 struct Wrapper {
+    before: String,
+    after: String,
     returns_result: bool,
 }
 
@@ -90,83 +92,17 @@ fn clean_crate_attrs(attrs: &mut Vec<syn::Attribute>) {
     });
 }
 
-/// Parse a raw doctest snippet using syn, hoist attributes and items to global
-/// scope, and leave execution statements wrapped in `fn main()`.
-fn wrap_and_hoist_doctest(
-    raw_doctest: &str,
-    needs_wrapper: bool,
-    returns_result: bool,
-) -> Option<String> {
-    let to_parse = if needs_wrapper {
-        if returns_result {
-            format!(
-                "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n{}\n}}",
-                raw_doctest
-            )
-        } else {
-            format!("fn main() {{\n{}\n}}", raw_doctest)
-        }
-    } else {
-        raw_doctest.to_string()
+/// Assemble a complete doctest source file, clean crate attrs, and format.
+fn process_doctest(dc: &DoctestCode) -> Option<String> {
+    let source = match &dc.wrapper {
+        Some(w) => format!("{}{}{}{}", dc.crate_level, w.before, dc.code, w.after),
+        None => format!("{}{}", dc.crate_level, dc.code),
     };
-    let mut ast = syn::parse_str::<SynFile>(&to_parse).ok()?;
-
-    if needs_wrapper {
-        let mut hoisted_items: Vec<Item> = Vec::new();
-        let mut main_stmts = Vec::new();
-
-        if let Some(Item::Fn(mut dummy_func)) = ast.items.pop() {
-            for attr in dummy_func.attrs.drain(..) {
-                if matches!(attr.style, AttrStyle::Inner(_)) {
-                    ast.attrs.push(attr);
-                }
-            }
-
-            for stmt in dummy_func.block.stmts.drain(..) {
-                match stmt {
-                    Stmt::Item(item) => hoisted_items.push(item),
-                    // Brace-delimited macro invocations (e.g. thread_local! { ... })
-                    // are item-like and belong at file scope.
-                    Stmt::Macro(ref m)
-                        if matches!(m.mac.delimiter, syn::MacroDelimiter::Brace(_)) =>
-                    {
-                        hoisted_items.push(Item::Macro(syn::ItemMacro {
-                            attrs: m.attrs.clone(),
-                            ident: None,
-                            mac: m.mac.clone(),
-                            semi_token: m.semi_token,
-                        }));
-                    }
-                    _ => main_stmts.push(stmt),
-                }
-            }
-
-            if returns_result {
-                dummy_func.sig.output = syn::parse_quote!(-> Result<(), impl core::fmt::Debug>);
-            }
-            dummy_func.block.stmts = main_stmts;
-            hoisted_items.push(Item::Fn(dummy_func));
-        }
-
-        ast.items = hoisted_items;
-    }
-
+    let mut ast = syn::parse_str::<SynFile>(&source).ok()?;
     clean_crate_attrs(&mut ast.attrs);
-
     let tokens = quote!(#ast);
-    let parsed_file: SynFile = syn::parse2(tokens).ok()?;
-    Some(prettyplease::unparse(&parsed_file))
-}
-
-/// Process a single doctest.
-fn process_doctest(
-    crate_level: &str,
-    code: &str,
-    has_wrapper: bool,
-    returns_result: bool,
-) -> Option<String> {
-    let full = format!("{}{}", crate_level, code);
-    wrap_and_hoist_doctest(&full, has_wrapper, returns_result)
+    let parsed: SynFile = syn::parse2(tokens).ok()?;
+    Some(prettyplease::unparse(&parsed))
 }
 
 /// Build the output filename: {library}_{path_part}_doctest_{line}.rs
@@ -262,11 +198,8 @@ fn main() {
         seen.insert(key);
 
         let dc = dt.doctest_code.as_ref().unwrap();
-        let has_wrapper = dc.wrapper.is_some();
-        let returns_result = dc.wrapper.as_ref().is_some_and(|w| w.returns_result);
-        let crate_level = &dc.crate_level;
 
-        let full_code = match process_doctest(&crate_level, &dc.code, has_wrapper, returns_result) {
+        let full_code = match process_doctest(dc) {
             Some(code) => code,
             None => {
                 n_skipped_parse += 1;
@@ -291,182 +224,129 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn hoist(code: &str) -> String {
-        wrap_and_hoist_doctest(code, true, false).expect("parse failed")
+    fn simple_wrapper() -> Option<Wrapper> {
+        Some(Wrapper {
+            before: "fn main() {\n".into(),
+            after: "\n}".into(),
+            returns_result: false,
+        })
+    }
+
+    fn result_wrapper() -> Option<Wrapper> {
+        Some(Wrapper {
+            before: "fn main() { fn _inner() -> core::result::Result<(), impl core::fmt::Debug> {\n".into(),
+            after: "\n} _inner().unwrap() }".into(),
+            returns_result: true,
+        })
+    }
+
+    fn dc(crate_level: &str, code: &str, wrapper: Option<Wrapper>) -> DoctestCode {
+        DoctestCode {
+            crate_level: crate_level.into(),
+            code: code.into(),
+            wrapper,
+        }
     }
 
     #[test]
     fn simple_statements_wrapped_in_main() {
-        let out = hoist(
-            r#"
-let x = 1;
-assert_eq!(x, 1);
-"#,
-        );
+        let out = process_doctest(&dc("", "let x = 1;\nassert_eq!(x, 1);", simple_wrapper())).unwrap();
         assert!(out.contains("fn main()"));
         assert!(out.contains("let x = 1;"));
     }
 
     #[test]
-    fn inner_attrs_hoisted_to_crate_level() {
-        let out = hoist(
-            r#"
-#![feature(test_feature)]
-let x = 1;
-"#,
-        );
-        let feat = out.find("#![feature(test_feature)]").unwrap();
-        let main = out.find("fn main()").unwrap();
-        assert!(feat < main);
-    }
-
-    #[test]
-    fn use_and_struct_hoisted_outside_main() {
-        let out = hoist(
-            r#"
-use std::collections::HashMap;
-
-struct Foo {
-    x: i32,
-}
-
-let f = Foo { x: 1 };
-"#,
-        );
-        let main = out.find("fn main()").unwrap();
-        assert!(out.find("use std::collections::HashMap;").unwrap() < main);
-        assert!(out.find("struct Foo").unwrap() < main);
-        assert!(out.contains("let f = Foo"));
-    }
-
-    #[test]
-    fn fn_and_impl_hoisted() {
-        let out = hoist(
-            r#"
-struct S;
-
-impl S {
-    fn go(&self) -> i32 { 42 }
-}
-
-fn helper() -> i32 { 1 }
-
-let s = S;
-assert_eq!(s.go(), 42);
-"#,
-        );
-        let main = out.find("fn main()").unwrap();
-        assert!(out.find("impl S").unwrap() < main);
-        assert!(out.find("fn helper()").unwrap() < main);
-        assert!(out.contains("s.go()"));
+    fn crate_level_attrs_preserved() {
+        let out = process_doctest(&dc(
+            "#![allow(unused)]\n#![feature(test_feature)]\n\n",
+            "let x = 1;",
+            simple_wrapper(),
+        )).unwrap();
+        assert!(out.contains("#![allow(unused)]"));
+        assert!(out.contains("#![feature(test_feature)]"));
     }
 
     #[test]
     fn user_provided_main_not_double_wrapped() {
-        let out = wrap_and_hoist_doctest(
-            r#"
-use std::fmt;
-
-fn main() {
-    println!("hello");
-}
-"#,
-            false,
-            false,
-        )
-        .unwrap();
+        let out = process_doctest(&dc(
+            "",
+            "use std::fmt;\nfn main() {\n    println!(\"hello\");\n}",
+            None,
+        )).unwrap();
         assert_eq!(out.matches("fn main()").count(), 1);
         assert!(out.contains("use std::fmt;"));
     }
 
     #[test]
+    fn deny_warnings_removed() {
+        let out = process_doctest(&dc(
+            "#![deny(warnings)]\n",
+            "let x = 1;",
+            simple_wrapper(),
+        )).unwrap();
+        assert!(!out.contains("deny"));
+    }
+
+    #[test]
+    fn deny_warnings_removed_with_other_attrs() {
+        let out = process_doctest(&dc(
+            "#![deny(warnings)]\n#![feature(test_feature)]\n\n",
+            "let x = 1;",
+            simple_wrapper(),
+        )).unwrap();
+        assert!(!out.contains("deny"));
+        assert!(out.contains("#![feature(test_feature)]"));
+    }
+
+    #[test]
     fn stmt_expr_attributes_removed_when_sole_feature() {
-        let out = hoist(
-            r#"
-#![feature(stmt_expr_attributes)]
-let x = 1;
-"#,
-        );
+        let out = process_doctest(&dc(
+            "#![feature(stmt_expr_attributes)]\n\n",
+            "let x = 1;",
+            simple_wrapper(),
+        )).unwrap();
         assert!(!out.contains("stmt_expr_attributes"));
         assert!(!out.contains("#![feature"));
     }
 
     #[test]
     fn stmt_expr_attributes_removed_but_others_kept() {
-        let out = hoist(
-            r#"
-#![feature(test_feature, stmt_expr_attributes)]
-let x = 1;
-"#,
-        );
+        let out = process_doctest(&dc(
+            "#![feature(test_feature, stmt_expr_attributes)]\n\n",
+            "let x = 1;",
+            simple_wrapper(),
+        )).unwrap();
         assert!(!out.contains("stmt_expr_attributes"));
         assert!(out.contains("#![feature(test_feature)]"));
     }
 
     #[test]
-    fn deny_warnings_removed() {
-        let out = hoist(
-            r#"
-#![deny(warnings)]
-let x = 1;
-"#,
-        );
+    fn no_wrapper_cleans_attrs() {
+        let out = process_doctest(&dc(
+            "#![deny(warnings)]\n#![feature(stmt_expr_attributes, coroutines)]\n\n",
+            "fn main() {\n    let x = 1;\n}",
+            None,
+        )).unwrap();
         assert!(!out.contains("deny"));
-        assert!(!out.contains("warnings"));
+        assert!(!out.contains("stmt_expr_attributes"));
+        assert!(out.contains("#![feature(coroutines)]"));
     }
 
     #[test]
-    fn deny_warnings_removed_with_other_attrs() {
-        let out = hoist(
-            r#"
-#![deny(warnings)]
-#![feature(test_feature)]
-let x = 1;
-"#,
-        );
-        assert!(!out.contains("deny"));
-        assert!(out.contains("#![feature(test_feature)]"));
+    fn returns_result_wrapper() {
+        let out = process_doctest(&dc(
+            "",
+            "let x = \"123\".parse::<i32>()?;\nassert_eq!(x, 123);\nOk(())",
+            result_wrapper(),
+        )).unwrap();
+        assert!(out.contains("_inner"));
+        assert!(out.contains("Ok(())"));
     }
 
     #[test]
-    fn mod_hoisted_outside_main() {
-        let out = hoist(
-            r#"
-mod inner {
-    pub fn f() -> i32 { 1 }
-}
-
-assert_eq!(inner::f(), 1);
-"#,
-        );
-        assert!(out.find("mod inner").unwrap() < out.find("fn main()").unwrap());
-    }
-
-    #[test]
-    fn extern_fn_hoisted() {
-        let out = hoist(
-            r#"
-unsafe extern "C" fn my_func() -> i32 { 42 }
-
-let x = unsafe { my_func() };
-"#,
-        );
-        assert!(
-            out.find(r#"unsafe extern "C" fn my_func"#).unwrap() < out.find("fn main()").unwrap()
-        );
-    }
-
-    #[test]
-    fn process_doctest_prepends_crate_level() {
-        let result = process_doctest("#![allow(unused)]\n", "let x = 1;", true, false).unwrap();
-        assert!(result.starts_with("#![allow(unused)]\n"));
-    }
-
-    #[test]
-    fn process_doctest_no_wrapper() {
-        let result = process_doctest("#![allow(unused)]\n", "fn main() { }", false, false).unwrap();
-        assert!(result.contains("#![allow(unused)]"));
-        assert!(result.contains("fn main()"));
+    fn unparseable_code_returns_none() {
+        let out = process_doctest(&dc("", "this is not valid rust {{{", simple_wrapper()));
+        assert!(out.is_none());
     }
 
     #[test]
@@ -483,81 +363,5 @@ let x = unsafe { my_func() };
             build_filename("core", "core/src/num/mod.rs", 42),
             "core_num_mod_doctest_42.rs"
         );
-    }
-
-    #[test]
-    fn returns_result_adds_return_type() {
-        let out = wrap_and_hoist_doctest(
-            r#"
-let x = "123".parse::<i32>()?;
-assert_eq!(x, 123);
-Ok(())
-"#,
-            true,
-            true,
-        )
-        .unwrap();
-        assert!(out.contains("-> Result<(), impl core::fmt::Debug>"));
-        assert!(out.contains("Ok(())"));
-    }
-
-    #[test]
-    fn expression_macros_stay_in_main() {
-        let out = hoist(
-            r#"
-let x = vec![1, 2, 3];
-assert_eq!(x.len(), 3);
-println!("done");
-"#,
-        );
-        let main = out.find("fn main()").unwrap();
-        assert!(out.find("assert_eq!").unwrap() > main);
-        assert!(out.find("vec!").unwrap() > main);
-    }
-
-    #[test]
-    fn macro_invocation_hoisted() {
-        let out = hoist(
-            r#"
-use std::cell::RefCell;
-
-thread_local! {
-    static FOO: RefCell<u32> = RefCell::new(1);
-}
-
-fn get_foo() -> u32 {
-    FOO.with_borrow(|v| *v)
-}
-
-assert_eq!(get_foo(), 1);
-"#,
-        );
-        let main = out.find("fn main()").unwrap();
-        assert!(out.find("thread_local!").unwrap() < main);
-        assert!(out.find("fn get_foo()").unwrap() < main);
-    }
-
-    #[test]
-    fn no_wrapper_cleans_attrs() {
-        let out = wrap_and_hoist_doctest(
-            r#"
-#![deny(warnings)]
-#![feature(stmt_expr_attributes, coroutines)]
-fn main() {
-    let x = 1;
-}
-"#,
-            false,
-            false,
-        )
-        .unwrap();
-        assert!(!out.contains("deny"));
-        assert!(!out.contains("stmt_expr_attributes"));
-        assert!(out.contains("#![feature(coroutines)]"));
-    }
-
-    #[test]
-    fn unparseable_code_returns_none() {
-        assert!(wrap_and_hoist_doctest("this is not valid rust {{{", true, false).is_none());
     }
 }
