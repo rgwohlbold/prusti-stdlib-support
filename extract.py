@@ -4,6 +4,7 @@
 #   "tqdm",
 # ]
 # ///
+import json
 import os
 import queue
 import signal
@@ -25,7 +26,12 @@ PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = 6
 
 
-DOCTEST_PROCESSOR = Path(__file__).parent / "doctest-processor" / "target" / "release" / "doctest-processor"
+def _clean_crate_level(crate_level: str) -> str:
+    """Remove #![deny(warnings)] and #![feature(stmt_expr_attributes)] from crate-level attrs."""
+    return (crate_level
+        .replace("#![deny(warnings)]\n", "")
+        .replace("#![feature(stmt_expr_attributes)]\n", "")
+    )
 
 
 def cmd_extract(args):
@@ -37,20 +43,57 @@ def cmd_extract(args):
         print(f"Error: Source directory {src_dir} does not exist.")
         return
 
-    print("Building doctest-processor...", file=sys.stderr)
-    subprocess.run(
-        ["cargo", "build", "--release"],
-        cwd=DOCTEST_PROCESSOR.parent.parent.parent,
-        check=True,
-    )
-
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
-        [str(DOCTEST_PROCESSOR), "--src-dir", str(src_dir), "--snippets-dir", str(output_dir), "--library", library],
+        ["cargo", "rustdoc", "--", "-Zunstable-options", "--output-format=doctest"],
+        capture_output=True, text=True, cwd=str(src_dir),
     )
     if result.returncode != 0:
+        print(f"Error: cargo rustdoc failed:\n{result.stderr}", file=sys.stderr)
         sys.exit(1)
+
+    data = json.loads(result.stdout)
+
+    seen = set()
+    n_written = 0
+    for dt in data["doctests"]:
+        attrs = dt["doctest_attributes"]
+        if (attrs["should_panic"] or attrs["no_run"] or attrs["compile_fail"]
+                or attrs["standalone_crate"] or attrs["ignore"] != "None"
+                or not attrs["rust"] or dt["doctest_code"] is None
+                or ".." in dt["file"]):
+            continue
+
+        key = (dt["file"], dt["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        dc = dt["doctest_code"]
+        crate_level = _clean_crate_level(dc["crate_level"])
+        code = dc["code"]
+        wrapper = dc["wrapper"]
+
+        if wrapper is not None:
+            full_code = crate_level + wrapper["before"] + code + wrapper["after"]
+        else:
+            full_code = crate_level + code
+
+        # Build filename
+        rel = dt["file"]
+        pfx = f"{library}/src/"
+        if rel.startswith(pfx):
+            rel = rel[len(pfx):]
+        rel = rel.rsplit(".", 1)[0] if "." in rel else rel
+        path_part = rel.replace("/", "_")
+
+        out_path = output_dir / f"{library}_{path_part}_doctest_{dt['line']}.rs"
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write(full_code)
+        n_written += 1
+
+    print(f"Done! Extracted {n_written} snippets to {output_dir}")
 
 
 def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path) -> tuple[bool, str]:
