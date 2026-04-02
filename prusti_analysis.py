@@ -31,8 +31,6 @@ def _categorize(
             return "unsupported: &raw mut/const rvalue might be reached (no crash)"
         elif re.search(unsupported_closure_re, output):
             return "unsupported: closure rvalue might be reached (no crash)"
-        elif "error: [Prusti: verification error] operation may overflow" in output:
-            return "success: potential overflow (no crash)"
         elif 'consistency error: ConsistencyError { message: "Consistency error: Duplicate identifier' in output:
             return "bug: duplicate identifier in consistency check"
         elif 'consistency error: ConsistencyError { message: "Consistency error: Local variable' in output:
