@@ -83,6 +83,13 @@ def _categorize(
         return "unsupported: CStr constants"
     elif panic_message == "called `Result::unwrap()` on an `Err` value: AlreadyEncoded":
         return "unsupported: recursive struct types"
+    elif panic_message == "Box<dyn Any>":
+        if "Got a scalar pair where a scalar was expected" in output and panic_location.endswith("rustc_const_eval/src/interpret/operand.rs"):
+            return "unsupported: c string literals"
+        elif "primitive read not possible for type: ()" in output and panic_location.endswith("rustc_const_eval/src/interpret/operand.rs"):
+            return "unsupported: nested references in promoted constants"
+        elif "`project_index` called on non-array type" in output and panic_location.endswith("rustc_const_eval/src/interpret/projection.rs"):
+            return "unsupported: nested references in promoted constants"
     elif panic_message == "not yet implemented" and panic_location == "prusti-encoder/src/encoders/ty/indirect.rs":
         return "unsupported: enum types in indirect predicate encoder"
     elif panic_message == "not yet implemented: unsizing with unsupported types":
