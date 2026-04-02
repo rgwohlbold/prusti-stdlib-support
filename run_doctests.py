@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 import polars as pl
-import prusti_analysis as pa
+import analysis
 
 PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = max(1, (os.cpu_count() or 4) * 3 // 4)
@@ -583,7 +583,7 @@ def cmd_analyze(args):
         print(f"Error: database {db_path} not found.", file=sys.stderr)
         sys.exit(1)
 
-    df = pa.transform(pa.load_dbs([db_path]))
+    df = analysis.transform(analysis.load_dbs([db_path]))
 
     n_success = len(df.filter(pl.col("success") == "success"))
     n_timeout = len(df.filter(pl.col("success") == "timeout"))

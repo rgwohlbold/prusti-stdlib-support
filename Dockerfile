@@ -5,10 +5,10 @@ WORKDIR /build
 RUN pip install --no-cache-dir polars markdown
 
 COPY issues/ issues/
-COPY browse.py prusti_analysis.py ./
+COPY generate_html_report.py analysis.py ./
 COPY *.db ./
 
-RUN python browse.py --output /build/static
+RUN python generate_html_report.py --output /build/static
 
 
 FROM nginx:alpine

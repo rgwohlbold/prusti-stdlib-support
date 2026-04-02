@@ -15,7 +15,7 @@ from pathlib import Path
 _NO_BRANCH_RE = re.compile(r'^prusti-\d{8}-\d{6}-[0-9a-f]+$')
 
 import polars as pl
-import prusti_analysis as pa
+import analysis
 
 ISSUES_DIR = Path("issues")
 
@@ -263,7 +263,7 @@ def main():
             print(f"Warning: {db_path} not found, skipping", file=sys.stderr)
             continue
         print(f"Loading {db_path.name} …")
-        dbs[db_path.name] = pa.transform(pa.load_dbs([db_path]))
+        dbs[db_path.name] = analysis.transform(analysis.load_dbs([db_path]))
 
     if not dbs:
         print("Error: no valid database files loaded", file=sys.stderr)
