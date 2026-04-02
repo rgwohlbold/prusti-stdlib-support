@@ -2,6 +2,7 @@
 # /// script
 # dependencies = [
 #   "tqdm",
+#   "polars",
 # ]
 # ///
 import json
@@ -21,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
+import polars as pl
+import prusti_analysis as pa
 
 PRUSTI_SERVER_PORT  = 27010
 PRUSTI_SERVER_COUNT = 6
@@ -540,6 +543,54 @@ def cmd_full(args):
     cmd_prusti(argparse.Namespace(prusti_rustc=str(prusti_rustc), dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout, server=args.server, verbose=args.verbose))
 
 
+def cmd_analyze(args):
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"Error: database {db_path} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    df = pa.transform(pa.load_dbs([db_path]))
+
+    n_success = len(df.filter(pl.col("success") == "success"))
+    n_timeout = len(df.filter(pl.col("success") == "timeout"))
+    n_fail = len(df.filter(pl.col("success") == "fail"))
+
+    print("=== Stdlib Doctest Analysis ===\n")
+    print(f"Total: {len(df)}  |  Success: {n_success}  |  Fail: {n_fail}  |  Timeout: {n_timeout}\n")
+
+    failures = df.filter(pl.col("success") == "fail")
+    counts = (
+        failures.group_by("category")
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
+    )
+
+    col_width = 80
+    print(f"{'Failure Category':<{col_width}}  Count")
+    print("-" * (col_width + 8))
+    for row in counts.iter_rows(named=True):
+        cat = row["category"]
+        display = cat if len(cat) <= col_width else cat[:col_width - 3] + "..."
+        print(f"{display:<{col_width}}  {row['count']}")
+    print("-" * (col_width + 8))
+    print(f"{'Total failures':<{col_width}}  {n_fail}\n")
+
+    print("=== Files by Category ===\n")
+    for row in counts.iter_rows(named=True):
+        cat = row["category"]
+        files = (
+            failures.filter(pl.col("category") == cat)
+            .select("file_name")
+            .sort("file_name")
+            .to_series()
+            .to_list()
+        )
+        print(f"--- {cat} ({len(files)} files) ---")
+        for f in files:
+            print(f)
+        print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Rust doctest extractor, compiler, and runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -603,6 +654,11 @@ def main():
                             help="Path to prusti-dev checkout (default: ~/progs/prusti-dev)")
     p_snapshot.add_argument("--branch", default=None, help="Branch label to include in snapshot name (e.g. fix_ConstEnc)")
     p_snapshot.set_defaults(func=cmd_snapshot)
+
+    # analyze subcommand
+    p_analyze = subparsers.add_parser("analyze", help="Analyze a Prusti results database and print categorized summary.")
+    p_analyze.add_argument("--db", required=True, help="Path to SQLite results database")
+    p_analyze.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
     args.func(args)
