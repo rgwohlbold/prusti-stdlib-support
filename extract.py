@@ -26,7 +26,7 @@ import polars as pl
 import prusti_analysis as pa
 
 PRUSTI_SERVER_PORT  = 27010
-PRUSTI_SERVER_COUNT = 6
+PRUSTI_SERVER_COUNT = max(1, (os.cpu_count() or 4) * 3 // 4)
 
 
 def _clean_crate_level(crate_level: str) -> str:
@@ -543,6 +543,40 @@ def cmd_full(args):
     cmd_prusti(argparse.Namespace(prusti_rustc=str(prusti_rustc), dest_dir=args.dest_dir, file=None, db=db, timeout=args.timeout, server=args.server, verbose=args.verbose))
 
 
+def cmd_ci(args):
+    prusti_dir = Path(args.prusti_dir).expanduser()
+    if not prusti_dir.is_dir():
+        print(f"Error: prusti directory not found at {prusti_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    prusti_rustc = prusti_dir / "target" / "debug" / "prusti-rustc"
+    if not prusti_rustc.is_file():
+        print(f"Error: prusti-rustc not found at {prusti_rustc}", file=sys.stderr)
+        sys.exit(1)
+
+    sysroot = _get_toolchain_sysroot(prusti_dir)
+    lib_base = sysroot / "lib" / "rustlib" / "src" / "rust" / "library"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        tests_dir = str(tmp / "tests")
+        db = str(tmp / "results.db")
+
+        for lib in ["alloc", "core"]:
+            snippets = str(tmp / lib / "snippets")
+            bins = str(tmp / lib / "bin")
+            print(f"=== {lib} ===")
+            cmd_extract(argparse.Namespace(library=lib, source_dir=str(lib_base / lib), output_dir=snippets))
+            cmd_compile(argparse.Namespace(snippets_dir=snippets, bin_dir=bins, prusti_rustc=str(prusti_rustc), verbose=False))
+            cmd_copy_passing(argparse.Namespace(snippets_dir=snippets, bin_dir=bins, dest_dir=tests_dir))
+
+        cmd_prusti(argparse.Namespace(
+            prusti_rustc=str(prusti_rustc), dest_dir=tests_dir, file=None,
+            db=db, timeout=args.timeout, server=args.server, verbose=False,
+        ))
+        cmd_analyze(argparse.Namespace(db=db))
+
+
 def cmd_analyze(args):
     db_path = Path(args.db)
     if not db_path.exists():
@@ -654,6 +688,13 @@ def main():
                             help="Path to prusti-dev checkout (default: ~/progs/prusti-dev)")
     p_snapshot.add_argument("--branch", default=None, help="Branch label to include in snapshot name (e.g. fix_ConstEnc)")
     p_snapshot.set_defaults(func=cmd_snapshot)
+
+    # ci subcommand
+    p_ci = subparsers.add_parser("ci", help="Extract, compile, verify, and analyze stdlib doctests (no Prusti build).")
+    p_ci.add_argument("--prusti-dir", required=True, dest="prusti_dir", help="Path to prusti-dev checkout (must already be built)")
+    p_ci.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds (default: 60)")
+    p_ci.add_argument("--noserver", action="store_false", dest="server", help=f"Disable prusti-server (enabled by default, {PRUSTI_SERVER_COUNT} instances)")
+    p_ci.set_defaults(func=cmd_ci, server=True)
 
     # analyze subcommand
     p_analyze = subparsers.add_parser("analyze", help="Analyze a Prusti results database and print categorized summary.")
