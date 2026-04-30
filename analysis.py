@@ -6,8 +6,11 @@ import polars as pl
 
 # ── regex constants ────────────────────────────────────────────────────────────
 const_overflow_re = r"range end index \d+ out of range for slice of length \d+"
-unsupported_mut_ptr_re = r"error: \[Prusti: verification error\] unsupported rvalue &raw (mut|const) [^ ]+ might be reached"
-unsupported_closure_re = r"error: \[Prusti: verification error\] unsupported rvalue {closure@[^}]+} \{[^\}]+\} might be reached"
+unsupported_mut_ptr_re = r"error: \[Prusti: verification error\] unsupported rvalue &raw (mut|const) .* might be reached"
+unsupported_closure_re = r"error: \[Prusti: verification error\] unsupported rvalue \{closure@[^}]+\}( \{[^}]+\})? might be reached"
+invalid_identifier_re = r"Consistency error: [^ ]+ is not a valid identifier."
+invalid_arguments_re = r"Consistency error: Domain function [^ ]+ with formal arguments .* cannot be applied to provided arguments"
+unsupported_unsizing_re = r"unsizing from `.*` to `.*` is not yet supported"
 c_str_re = r"not yet implemented: ConstValue::Slice: &'\?\d+ std::ffi::CStr"
 index_out_of_bounds_re = r"index out of bounds: the len is \d+ but the index is \d+"
 
@@ -32,24 +35,32 @@ def _categorize(
         elif re.search(unsupported_closure_re, output):
             return "unsupported: closure rvalue might be reached (no crash)"
         elif 'consistency error: ConsistencyError { message: "Consistency error: Duplicate identifier' in output:
-            return "bug: duplicate identifier in consistency check"
+            return "bug: duplicate identifier in consistency check (no crash)"
         elif 'consistency error: ConsistencyError { message: "Consistency error: Local variable' in output:
-            return "bug: local variable not found in consistency check"
+            return "bug: local variable not found in consistency check (no crash)"
+        elif re.search(invalid_identifier_re, output):
+            return "bug: invalid identifier in consistency check (no crash)"
+        elif re.search(invalid_arguments_re, output):
+            return "bug: invalid arguments to domain function in consistency check (no crash)"
+        elif re.search(unsupported_unsizing_re, output):
+            return "unsupported: unsizing with unsupported types (no crash)"
+        # these errors can occur legitimately, they don't indicate an error in Prusti, but a legit verification error
+        # since we don't have a panic message, we categorize this as a success even if the exit code is non-zero
+        elif '[Prusti: verification error] bounds check may fail' in output:
+            return "success"
+        elif '[Prusti: verification error] cast may fail: value might not fit into the target type' in output:
+            return "success"
+        elif '[Prusti: verification error] division by zero may occur' in output:
+            return "success"
         return "other"
 
     # all cases with panic messages
     if "not implemented: ty_name for dyn" in panic_message:
         return "unsupported: trait objects"
-    # elif "PcgError { kind: Unsupported(DerefUnsafePtr), context: [] }" in output:
-    #     return "unsupported (pcg): dereferencing unsafe pointers"
-    # elif "PcgError { kind: Unsupported(CallWithUnsafePtrWithNestedLifetime), context: [] }" in output:
-    #     return "unsupported (pcg): call with unsafe ptr with nested lifetimes"
     elif panic_message == "called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(DerefUnsafePtr), context: [] }":
         return "unsupported (pcg): dereferencing unsafe pointers"
     elif "<prusti_encoder::encoders::ty::generics::args_ty::GArgsTyEnc as task_encoder::TaskEncoder>::do_encode_full" in output and "compiler/rustc_middle/src/ty/generic_args.rs" in panic_location:
         return "bug: indexing during parametric const encoding"
-    elif panic_location == "prusti-encoder/src/encoders/mir_builtin.rs" and panic_message.startswith("expected array") and "prusti_encoder::encoders::mir_builtin::MirBuiltinEnc::handle_unsize" in output:
-        return "unsupported: unsizing of other types than refs to arrays"
     elif panic_location == "prusti-encoder/src/encoders/ty/indirect.rs" and first_prusti_frame == "prusti_encoder::encoders::impure::fn_wand::WandEncOutput::encode_predicates_for_function_shape_node" and panic_message == "called `Option::unwrap()` on a `None` value":
         return "bug: lifetime-annotated structs"
     elif '("wand encoder", "Unsupported(\\"function shape: CheckOutlivesError(CannotCompareRegions' in panic_message:
@@ -58,17 +69,20 @@ def _categorize(
         return "unsupported: coroutine types"
     elif re.match(const_overflow_re, panic_message):
         return "bug: const ptr offset overflow"
-    elif re.match(index_out_of_bounds_re, panic_message) and first_prusti_frame == "prusti_encoder::encoders::ty::generics::params::GParams::try_normalize::{{closure}}":
-        return "bug: ReVar from outer InferCtxt in try_normalize"
+    elif re.match(index_out_of_bounds_re, panic_message):
+        if first_prusti_frame == "prusti_encoder::encoders::ty::generics::params::GParams::try_normalize::{{closure}}":
+            return "bug: ReVar from outer InferCtxt in try_normalize"
+        elif first_prusti_frame == "prusti_encoder::encoders::ty::generics::params::GenericParams::map_idx":
+            return "bug: index out of bounds in GenericParams::map_index"
     elif panic_message.startswith("not implemented: ty_name for FnDef"):
         return "unsupported: passing functions into other functions"
     elif panic_message == "not yet implemented: bitwise operations":
         return "unsupported: bitwise operations"
     elif panic_message == "not yet implemented: cast kind PointerCoercion(MutToConstPointer, Implicit)":
         return "unsupported: implicit mut-to-const pointer coercions"
-    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(CallWithUnsafePtrWithNestedLifetime("):
+    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(CallWithUnsafePtrWithNestedLifetime"):
         return "unsupported (pcg): call with unsafe ptr with nested lifetime"
-    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(MoveUnsafePtrWithNestedLifetime("):
+    elif panic_message.startswith("called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(MoveUnsafePtrWithNestedLifetime"):
         return "unsupported (pcg): move unsafe ptr with nested lifetime"
     elif panic_message == "internal error: entered unreachable code":
         if panic_location == "prusti-encoder/src/encoders/ty/generics/params.rs" and first_prusti_frame == "prusti_encoder::encoders::ty::generics::params::GParams::ty_params::{{closure}}":
@@ -91,7 +105,9 @@ def _categorize(
     elif panic_message == "not yet implemented" and panic_location == "prusti-encoder/src/encoders/ty/indirect.rs":
         return "unsupported: enum types in indirect predicate encoder"
     elif panic_message == "not yet implemented: unsizing with unsupported types":
-        return "unsupported: unsizing of other types than refs to arrays"
+        return "unsupported: unsizing with unsupported types (no crash)"
+    elif panic_location == "prusti-encoder/src/encoders/mir_builtin.rs" and panic_message.startswith("expected array") and "prusti_encoder::encoders::mir_builtin::MirBuiltinEnc::handle_unsize" in output:
+        return "unsupported: unsizing with unsupported types (no crash)"
 
     # class of errors: constant encoding
     elif first_prusti_frame == "prusti_encoder::encoders::ty::data::TyData<D>::expect_primitive" and panic_message.startswith("expected primitive") and "prusti_encoder::encoders::const::ConstEnc::encode_scalar" in output:
@@ -163,5 +179,11 @@ def transform(df: pl.DataFrame) -> pl.DataFrame:
             return_dtype=pl.String,
         )
         .alias("category")
+    )
+    df = df.with_columns(
+        pl.when(pl.col("category") == "success")
+            .then(pl.lit("success"))
+            .otherwise(pl.col("success"))
+            .alias("success")
     )
     return df
