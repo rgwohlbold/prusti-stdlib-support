@@ -17,17 +17,6 @@ _NO_BRANCH_RE = re.compile(r'^prusti-\d{8}-\d{6}-[0-9a-f]+$')
 import polars as pl
 import analysis
 
-ISSUES_DIR = Path("issues")
-
-
-def _render_markdown(text: str) -> str:
-    try:
-        import markdown
-        return markdown.markdown(text, extensions=["tables", "fenced_code"])
-    except ImportError:
-        return f"<pre>{html.escape(text)}</pre>"
-
-
 _VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1">'
 
 _COMMON_STYLE = """
@@ -72,7 +61,6 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
     summary_html = "\n".join(summary_rows)
 
     # Category comparison table
-    issue_stems = {f.stem for f in ISSUES_DIR.glob("*.md")} if ISSUES_DIR.exists() else set()
     db_cat_maps: dict[str, dict[str, int]] = {}
     all_cats: set[str] = set()
     for name, df in dbs.items():
@@ -91,10 +79,7 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
     col_headers = "".join(f"<th>{html.escape(Path(n).stem)}</th>" for n in names)
     compare_rows = []
     for cat in sorted_cats:
-        if cat in issue_stems:
-            cat_cell = f'<a href="/issue/{urllib.parse.quote(cat)}/">{html.escape(cat)}</a>'
-        else:
-            cat_cell = f'<span class="no-issue">{html.escape(cat)}</span>'
+        cat_cell = f'<span class="no-issue">{html.escape(cat)}</span>'
         cells = "".join(
             f"<td style='text-align:right'>{db_cat_maps[n].get(cat, 0)}</td>"
             for n in names
@@ -137,16 +122,11 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
           .sort("count", descending=True)
     )
 
-    issue_stems = {f.stem for f in ISSUES_DIR.glob("*.md")} if ISSUES_DIR.exists() else set()
-
     rows = []
     for row in cats.iter_rows(named=True):
         cat   = row["category"]
         count = row["count"]
-        if cat in issue_stems:
-            link = f'<a href="/issue/{urllib.parse.quote(cat)}/">{html.escape(cat)}</a>'
-        else:
-            link = f'<span class="no-issue">{html.escape(cat)}</span>'
+        link = f'<span class="no-issue">{html.escape(cat)}</span>'
         rows.append(f"<tr><td>{link}</td><td style='text-align:right'>{count}</td></tr>")
 
     rows_html = "\n".join(rows)
@@ -177,37 +157,6 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
 </html>"""
 
 
-def _issue_page(md_file: Path) -> str:
-    body = _render_markdown(md_file.read_text())
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">{_VIEWPORT}
-<title>{html.escape(md_file.stem)}</title>
-<style>
-  body {{ font-family: sans-serif; max-width: 860px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.6; }}
-  code {{ background: #f4f4f4; padding: 1px 5px; border-radius: 3px; font-size: .92em; }}
-  pre  {{ background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }}
-  pre code {{ background: none; padding: 0; }}
-  table {{ border-collapse: collapse; margin: 1em 0; width: 100%; }}
-  .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-  th, td {{ border: 1px solid #ccc; padding: 4px 12px; }}
-  th {{ background: #f3f3f3; }}
-  a.back {{ display: inline-block; margin-bottom: 1.5em; color: #1a6eb5; text-decoration: none; }}
-  a.back:hover {{ text-decoration: underline; }}
-  h1 {{ font-size: 1.5em; }}
-  @media (max-width: 600px) {{
-    body {{ margin: 1em auto; }}
-  }}
-</style>
-</head>
-<body>
-<a class="back" href="/">← Back to index</a>
-{body}
-</body>
-</html>"""
-
-
 def generate(dbs: dict[str, pl.DataFrame], output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     multi = len(dbs) > 1
@@ -230,13 +179,6 @@ def generate(dbs: dict[str, pl.DataFrame], output_dir: Path):
         db_dir = output_dir / "db" / Path(name).stem
         db_dir.mkdir(parents=True, exist_ok=True)
         (db_dir / "index.html").write_text(_index_page(name, df, multi), encoding="utf-8")
-
-    # Issue pages
-    if ISSUES_DIR.exists():
-        for md_file in ISSUES_DIR.glob("*.md"):
-            issue_dir = output_dir / "issue" / md_file.stem
-            issue_dir.mkdir(parents=True, exist_ok=True)
-            (issue_dir / "index.html").write_text(_issue_page(md_file), encoding="utf-8")
 
 
 def main():

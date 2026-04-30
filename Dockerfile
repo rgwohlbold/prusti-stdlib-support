@@ -4,7 +4,6 @@ WORKDIR /build
 
 RUN pip install --no-cache-dir polars markdown
 
-COPY issues/ issues/
 COPY generate_html_report.py analysis.py ./
 COPY *.db ./
 
