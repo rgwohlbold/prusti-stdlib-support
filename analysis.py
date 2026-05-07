@@ -52,11 +52,15 @@ def _categorize(
             return "success"
         elif '[Prusti: verification error] division by zero may occur' in output:
             return "success"
+        elif '[Prusti internal error] Prusti encountered an unexpected internal error' in output and 'A verification error occurred, but it could not be backtranslated':
+            return "bug: verification error could not be backtranslated (no crash)"
         return "other"
 
     # all cases with panic messages
     if "not implemented: ty_name for dyn" in panic_message:
         return "unsupported: trait objects"
+    elif panic_message == "verification error could not be backtranslated":
+        return "bug: verification error could not be backtranslated (no crash)"
     elif panic_message == "called `Result::unwrap()` on an `Err` value: PcgError { kind: Unsupported(DerefUnsafePtr), context: [] }":
         return "unsupported (pcg): dereferencing unsafe pointers"
     elif "<prusti_encoder::encoders::ty::generics::args_ty::GArgsTyEnc as task_encoder::TaskEncoder>::do_encode_full" in output and "compiler/rustc_middle/src/ty/generic_args.rs" in panic_location:

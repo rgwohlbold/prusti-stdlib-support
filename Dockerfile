@@ -6,6 +6,8 @@ RUN pip install --no-cache-dir polars markdown
 
 COPY generate_html_report.py analysis.py ./
 COPY *.db ./
+COPY core/snippets/ ./core/snippets/
+COPY alloc/snippets/ ./alloc/snippets/
 
 RUN python generate_html_report.py --output /build/static
 

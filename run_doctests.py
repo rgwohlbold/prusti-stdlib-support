@@ -102,27 +102,19 @@ def cmd_extract(args):
     print(f"Done! Extracted {n_written} snippets to {output_dir}")
 
 
-def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path, channel: str = "nightly") -> tuple[bool, str]:
+def compile_one(rs_file: Path, bin_dir: Path, prusti_rustc: Path) -> tuple[bool, str]:
     out_bin = bin_dir / rs_file.stem
-    result = subprocess.run(
-        ["rustc", f"+{channel}", "--edition", "2021", "-Zcrate-attr=feature(stmt_expr_attributes)", str(rs_file), "-o", str(out_bin)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return False, result.stderr
     env = os.environ.copy()
     env.update(PRUSTI_NO_VERIFY_ENV)
-    with tempfile.TemporaryDirectory() as tmp:
-        pcheck = subprocess.run(
-            [str(prusti_rustc), "--edition", "2021", "--crate-type=lib", "--out-dir", tmp, str(rs_file)],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-    if pcheck.returncode != 0:
+    result = subprocess.run(
+        [str(prusti_rustc), "--edition", "2021", "--crate-type=bin", str(rs_file), "-o", str(out_bin)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
         out_bin.unlink(missing_ok=True)
-        return False, pcheck.stderr
+        return False, result.stderr
     return True, result.stderr
 
 
@@ -144,9 +136,8 @@ def cmd_compile(args):
     ok = fail = 0
     failures = []
 
-    channel = getattr(args, "channel", "nightly")
     with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(compile_one, f, bin_dir, prusti_rustc, channel): f for f in rs_files}
+        futures = {executor.submit(compile_one, f, bin_dir, prusti_rustc): f for f in rs_files}
         with tqdm(total=len(rs_files), desc="Compiling", unit="file") as pbar:
             for future in as_completed(futures):
                 success, stderr = future.result()
@@ -242,7 +233,6 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 PRUSTI_ENV = {
     "PRUSTI_QUIET": "true",
-    "PRUSTI_FULL_COMPILATION": "true",
     "PRUSTI_CARGO": "",
     "PRUSTI_CHECK_OVERFLOWS": "false",
 }
@@ -250,6 +240,7 @@ PRUSTI_ENV = {
 PRUSTI_NO_VERIFY_ENV = {
     **PRUSTI_ENV,
     "PRUSTI_NO_VERIFY": "true",
+    "PRUSTI_FULL_COMPILATION": "true",
 }
 
 
@@ -542,7 +533,7 @@ def cmd_full(args):
     for lib in ["alloc", "core"]:
         print(f"=== {lib} ===")
         cmd_extract(argparse.Namespace(library=lib, source_dir=str(lib_base / lib), output_dir=f"{lib}/snippets/", channel=channel))
-        cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=str(prusti_rustc), verbose=args.verbose, channel=channel))
+        cmd_compile(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", prusti_rustc=str(prusti_rustc), verbose=args.verbose))
         cmd_copy_passing(argparse.Namespace(snippets_dir=f"{lib}/snippets/", bin_dir=f"{lib}/bin/", dest_dir=args.dest_dir))
 
     for lib in ["alloc", "core"]:
@@ -584,7 +575,7 @@ def cmd_ci(args):
             bins = str(tmp / lib / "bin")
             print(f"=== {lib} ===")
             cmd_extract(argparse.Namespace(library=lib, source_dir=str(lib_base / lib), output_dir=snippets, channel=channel))
-            cmd_compile(argparse.Namespace(snippets_dir=snippets, bin_dir=bins, prusti_rustc=str(prusti_rustc), verbose=True, channel=channel))
+            cmd_compile(argparse.Namespace(snippets_dir=snippets, bin_dir=bins, prusti_rustc=str(prusti_rustc), verbose=True))
             cmd_copy_passing(argparse.Namespace(snippets_dir=snippets, bin_dir=bins, dest_dir=tests_dir))
 
         cmd_prusti(argparse.Namespace(

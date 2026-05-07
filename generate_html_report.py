@@ -9,6 +9,7 @@ Defaults to all prusti-*.db files in the current directory and output to ./stati
 import argparse
 import html
 import re
+import shutil
 import urllib.parse
 from pathlib import Path
 
@@ -29,8 +30,6 @@ _COMMON_STYLE = """
   tr:nth-child(even) { background: #fafafa; }
   .no-issue { color: #888; }
   a { color: #1a6eb5; }
-  a.back { display: inline-block; margin-bottom: 1.5em; text-decoration: none; }
-  a.back:hover { text-decoration: underline; }
   @media (max-width: 600px) {
     body { margin: 1em; }
     th, td { padding: 4px 8px; font-size: 0.9em; }
@@ -77,9 +76,11 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
     sort_ref = no_branch[-1] if no_branch else names[-1]
     sorted_cats = sorted(all_cats, key=lambda c: -db_cat_maps[sort_ref].get(c, 0))
     col_headers = "".join(f"<th>{html.escape(Path(n).stem)}</th>" for n in names)
+    ref_stem = urllib.parse.quote(Path(sort_ref).stem)
     compare_rows = []
     for cat in sorted_cats:
-        cat_cell = f'<span class="no-issue">{html.escape(cat)}</span>'
+        slug = _cat_slug(cat)
+        cat_cell = f'<a href="/db/{ref_stem}/category/{urllib.parse.quote(slug)}/">{html.escape(cat)}</a>'
         cells = "".join(
             f"<td style='text-align:right'>{db_cat_maps[n].get(cat, 0)}</td>"
             for n in names
@@ -109,7 +110,19 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
 </html>"""
 
 
-def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
+def _cat_slug(cat: str) -> str:
+    """Turn a category string into a URL-safe slug."""
+    import hashlib
+    slug = re.sub(r'[^a-z0-9]+', '-', cat.lower()).strip('-')
+    if not slug:
+        slug = 'unknown'
+    if len(slug) > 80:
+        h = hashlib.sha1(cat.encode()).hexdigest()[:12]
+        slug = slug[:80].rstrip('-') + '-' + h
+    return slug
+
+
+def _index_page(db_name: str, df: pl.DataFrame) -> str:
     total   = len(df)
     success = len(df.filter(df["success"] == "success"))
     fail    = len(df.filter(df["success"] == "fail"))
@@ -126,11 +139,11 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
     for row in cats.iter_rows(named=True):
         cat   = row["category"]
         count = row["count"]
-        link = f'<span class="no-issue">{html.escape(cat)}</span>'
+        slug = _cat_slug(cat)
+        link = f'<a href="category/{urllib.parse.quote(slug)}/">{html.escape(cat)}</a>'
         rows.append(f"<tr><td>{link}</td><td style='text-align:right'>{count}</td></tr>")
 
     rows_html = "\n".join(rows)
-    back = '<a class="back" href="/">← All databases</a>\n' if multi else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -141,7 +154,7 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
 </style>
 </head>
 <body>
-{back}<h1>Prusti Analysis — {html.escape(db_name)}</h1>
+<h1>Prusti Analysis — {html.escape(db_name)}</h1>
 <p class="summary">
   Total: <b>{total}</b> &nbsp;|&nbsp;
   Success: <b>{success}</b> &nbsp;|&nbsp;
@@ -152,6 +165,35 @@ def _index_page(db_name: str, df: pl.DataFrame, multi: bool) -> str:
 <div class="table-wrap"><table>
 <tr><th>Category</th><th>Count</th></tr>
 {rows_html}
+</table></div>
+</body>
+</html>"""
+
+
+def _category_page(db_name: str, category: str, df: pl.DataFrame) -> str:
+    files = (
+        df.filter(pl.col("category") == category)
+          .select("file_name")
+          .sort("file_name")
+    )
+    rows = "\n".join(
+        f"<tr><td><a href=\"/snippets/{urllib.parse.quote(row['file_name'])}.txt\">{html.escape(row['file_name'])}</a></td></tr>"
+        for row in files.iter_rows(named=True)
+    )
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">{_VIEWPORT}
+<title>{html.escape(category)} — {html.escape(db_name)}</title>
+<style>{_COMMON_STYLE}</style>
+</head>
+<body>
+<h1>{html.escape(category)}</h1>
+<p>Database: <b>{html.escape(db_name)}</b></p>
+<p>{len(files)} file(s) affected</p>
+<div class="table-wrap"><table>
+<tr><th>File</th></tr>
+{rows}
 </table></div>
 </body>
 </html>"""
@@ -178,7 +220,35 @@ def generate(dbs: dict[str, pl.DataFrame], output_dir: Path):
     for name, df in dbs.items():
         db_dir = output_dir / "db" / Path(name).stem
         db_dir.mkdir(parents=True, exist_ok=True)
-        (db_dir / "index.html").write_text(_index_page(name, df, multi), encoding="utf-8")
+        (db_dir / "index.html").write_text(_index_page(name, df), encoding="utf-8")
+
+        # Per-category pages
+        cats = (
+            df.filter(pl.col("category").is_not_null() & (pl.col("category") != ""))
+              .get_column("category")
+              .unique()
+        )
+        for cat in cats:
+            slug = _cat_slug(cat)
+            cat_dir = db_dir / "category" / slug
+            cat_dir.mkdir(parents=True, exist_ok=True)
+            (cat_dir / "index.html").write_text(
+                _category_page(name, cat, df), encoding="utf-8"
+            )
+
+    # Copy .rs snippet files
+    snippet_dirs = [Path("core/snippets"), Path("alloc/snippets")]
+    snippets_out = output_dir / "snippets"
+    snippets_out.mkdir(parents=True, exist_ok=True)
+    found_any = False
+    for src_dir in snippet_dirs:
+        if not src_dir.is_dir():
+            continue
+        for rs_file in src_dir.glob("*.rs"):
+            shutil.copy2(rs_file, snippets_out / (rs_file.name + ".txt"))
+            found_any = True
+    if not found_any:
+        raise FileNotFoundError("No .rs snippet files found in core/snippets or alloc/snippets")
 
 
 def main():

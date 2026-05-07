@@ -1,5 +1,5 @@
-alloc/
-core/
+alloc/bin
+core/bin
 tests/
 __pycache__/
 *.ipynb
