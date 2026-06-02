@@ -64,7 +64,7 @@ def _db_list_page(dbs: dict[str, pl.DataFrame]) -> str:
     all_cats: set[str] = set()
     for name, df in dbs.items():
         cats = (
-            df.filter(df["category"].is_not_null() & (df["category"] != ""))
+            df.filter(df["category"].is_not_null() & (df["category"] != "") & (df["success"] == "fail"))
               .group_by("category")
               .agg(pl.len().alias("count"))
         )
@@ -129,7 +129,7 @@ def _index_page(db_name: str, df: pl.DataFrame) -> str:
     timeout = len(df.filter(df["success"] == "timeout"))
 
     cats = (
-        df.filter(df["category"].is_not_null() & (df["category"] != ""))
+        df.filter(df["category"].is_not_null() & (df["category"] != "") & (df["success"] == "fail"))
           .group_by("category")
           .agg(pl.len().alias("count"))
           .sort("count", descending=True)
@@ -172,7 +172,7 @@ def _index_page(db_name: str, df: pl.DataFrame) -> str:
 
 def _category_page(db_name: str, category: str, df: pl.DataFrame) -> str:
     files = (
-        df.filter(pl.col("category") == category)
+        df.filter((pl.col("category") == category) & (pl.col("success") == "fail"))
           .select("file_name")
           .sort("file_name")
     )
@@ -224,7 +224,7 @@ def generate(dbs: dict[str, pl.DataFrame], output_dir: Path):
 
         # Per-category pages
         cats = (
-            df.filter(pl.col("category").is_not_null() & (pl.col("category") != ""))
+            df.filter(pl.col("category").is_not_null() & (pl.col("category") != "") & (pl.col("success") == "fail"))
               .get_column("category")
               .unique()
         )
