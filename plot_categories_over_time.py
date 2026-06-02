@@ -22,7 +22,8 @@ import analysis
 
 DB_RE = re.compile(r"^prusti-(\d{8})-(\d{6})-[0-9a-f]+\.db$")
 
-TOP_N = 20
+TOP_N = 19
+OTHER_LABEL = "other"
 
 
 def find_dbs(root: Path) -> list[tuple[datetime, Path]]:
@@ -62,11 +63,23 @@ def main(out_path: Path, top_n: int) -> None:
 
     timestamps = sorted({r["timestamp"] for r in rows})
     ts_to_idx = {t: i for i, t in enumerate(timestamps)}
+
+    long = long.with_columns(
+        pl.when(pl.col("category").is_in(top))
+          .then(pl.col("category"))
+          .otherwise(pl.lit(OTHER_LABEL))
+          .alias("category")
+    )
+    stack_order = top + [OTHER_LABEL]
     grid = pl.DataFrame(
-        [{"timestamp": t, "category": c} for t in timestamps for c in top]
+        [{"timestamp": t, "category": c} for t in timestamps for c in stack_order]
     )
     plot_df = (
-        grid.join(long, on=["timestamp", "category"], how="left")
+        grid.join(
+            long.group_by(["timestamp", "category"]).agg(pl.col("count").sum()),
+            on=["timestamp", "category"],
+            how="left",
+        )
         .with_columns(
             pl.col("count").fill_null(0),
             pl.col("timestamp").replace_strict(ts_to_idx, return_dtype=pl.Int64).alias("idx"),
@@ -76,7 +89,7 @@ def main(out_path: Path, top_n: int) -> None:
     )
 
     sns.set_theme(style="whitegrid", context="paper")
-    palette = sns.color_palette("tab20", n_colors=len(top))
+    palette = sns.color_palette("tab20", n_colors=len(top)) + [(0.6, 0.6, 0.6)]
     date_labels = [t.strftime("%Y-%m-%d") for t in timestamps]
     xs = list(range(len(timestamps)))
 
@@ -84,19 +97,19 @@ def main(out_path: Path, top_n: int) -> None:
         plot_df.pivot_table(
             index="idx", columns="category", values="count", fill_value=0
         )
-        .reindex(columns=top)
+        .reindex(columns=stack_order)
         .reindex(index=xs, fill_value=0)
     )
 
     fig, ax = plt.subplots(figsize=(8.5, 5.0))
     bottom = [0.0] * len(xs)
-    for i, cat in enumerate(top):
+    for i, cat in enumerate(stack_order):
         values = wide[cat].tolist()
         ax.bar(xs, values, bottom=bottom, color=palette[i], label=cat, width=0.85, edgecolor="none")
         bottom = [b + v for b, v in zip(bottom, values)]
 
     ax.set_xlabel("Commit date")
-    ax.set_ylabel(f"Number of failing tests (top {len(top)} categories)")
+    ax.set_ylabel("Number of failing tests")
     ax.set_xticks(xs)
     ax.set_xticklabels(date_labels, rotation=45, ha="right")
     ax.margins(x=0.01)

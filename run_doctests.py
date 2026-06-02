@@ -585,27 +585,10 @@ def cmd_ci(args):
         cmd_analyze(argparse.Namespace(db=db))
 
 
-def cmd_analyze(args):
-    db_path = Path(args.db)
-    if not db_path.exists():
-        print(f"Error: database {db_path} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    df = analysis.transform(analysis.load_dbs([db_path]))
-
-    n_success = len(df.filter(pl.col("success") == "success"))
-    n_timeout = len(df.filter(pl.col("success") == "timeout"))
-    n_fail = len(df.filter(pl.col("success") == "fail"))
-
+def _print_standard_report(df, n_success, n_fail, n_timeout, counts):
+    failures = df.filter(pl.col("success") == "fail")
     print("=== Stdlib Doctest Analysis ===\n")
     print(f"Total: {len(df)}  |  Success: {n_success}  |  Fail: {n_fail}  |  Timeout: {n_timeout}\n")
-
-    failures = df.filter(pl.col("success") == "fail")
-    counts = (
-        failures.group_by("category")
-        .agg(pl.len().alias("count"))
-        .sort("count", descending=True)
-    )
 
     col_width = 80
     print(f"{'Failure Category':<{col_width}}  Count")
@@ -631,6 +614,49 @@ def cmd_analyze(args):
         for f in files:
             print(f)
         print()
+
+
+def cmd_analyze(args):
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"Error: database {db_path} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    df = analysis.transform(analysis.load_dbs([db_path]))
+
+    n_success = len(df.filter(pl.col("success") == "success"))
+    n_timeout = len(df.filter(pl.col("success") == "timeout"))
+    n_fail = len(df.filter(pl.col("success") == "fail"))
+
+    failures = df.filter(pl.col("success") == "fail")
+    counts = (
+        failures.group_by("category")
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
+    )
+
+    if getattr(args, "csv", None):
+        import csv
+        import io
+        
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["Category", "Count"])
+        for row in counts.iter_rows(named=True):
+            writer.writerow([row["category"], row["count"]])
+            
+        csv_data = csv_buffer.getvalue()
+        
+        if args.csv == "stdout" or args.csv is True:
+            print(csv_data, end="")
+        else:
+            csv_path = Path(args.csv)
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                f.write(csv_data)
+            print(f"Wrote CSV analysis to {csv_path}")
+            _print_standard_report(df, n_success, n_fail, n_timeout, counts)
+    else:
+        _print_standard_report(df, n_success, n_fail, n_timeout, counts)
 
 
 def main():
@@ -707,6 +733,7 @@ def main():
     # analyze subcommand
     p_analyze = subparsers.add_parser("analyze", help="Analyze a Prusti results database and print categorized summary.")
     p_analyze.add_argument("--db", required=True, help="Path to SQLite results database")
+    p_analyze.add_argument("--csv", nargs="?", const="stdout", help="Export failure categories and counts as CSV. If a file path is provided, writes to that file; otherwise, prints to stdout.")
     p_analyze.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
